@@ -13,6 +13,7 @@
 #include "timer.h"
 #include "uart.h"
 
+#include "packet.h"
 #include "blink.h"
 
 //=========================== defines ==========================================
@@ -65,7 +66,7 @@ static void _uart_callback(uint8_t data) {
 void blink_event_callback(bl_event_t event, bl_event_data_t event_data) {
     switch (event) {
         case BLINK_NEW_PACKET:
-            printf("Blink received data packet of length %d: ", event_data.data.new_packet.length);
+            printf("Blink packet (%d B): ", event_data.data.new_packet.length);
             for (int i = 0; i < event_data.data.new_packet.length; i++) {
                 printf("%02X ", event_data.data.new_packet.packet[i]);
             }
@@ -158,9 +159,18 @@ int main(void) {
                 case DB_HDLC_STATE_READY:
                 {
                     size_t msg_len = db_hdlc_decode(_gw_vars.hdlc_rx_buffer);
-                    // Replace 0000 with actual gateway address
-                    uint64_t gateway_address = db_device_id();
-                    memcpy(_gw_vars.hdlc_rx_buffer + 10, &gateway_address, sizeof(uint64_t));
+
+                    bl_packet_header_t *header = (bl_packet_header_t *)_gw_vars.hdlc_rx_buffer;
+                    uint8_t *payload = _gw_vars.hdlc_rx_buffer + sizeof(bl_packet_header_t);
+
+                    header->dst = BLINK_BROADCAST_ADDRESS;
+                    header->src = db_device_id();
+                    header->version = BLINK_PROTOCOL_VERSION;
+                    header->type = BLINK_PACKET_DATA;
+
+                    memcpy(_gw_vars.hdlc_rx_buffer, header, sizeof(bl_packet_header_t));
+                    memcpy(_gw_vars.hdlc_rx_buffer + sizeof(bl_packet_header_t), payload, msg_len - sizeof(bl_packet_header_t));
+
                     if (msg_len) {
                         blink_tx(_gw_vars.hdlc_rx_buffer, msg_len);
                     }
