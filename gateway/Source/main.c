@@ -41,6 +41,8 @@ typedef struct {
     bool                         radio_packet_received;
     gateway_packet_t             uart_packet;                           ///< Queue used to process received UART bytes outside of interrupt
     bool                         uart_packet_received;
+    gateway_packet_t             node_state_change_packet;              ///< Used to signal when a node joined or left
+    bool                         node_state_change_packet_pending;
     uint32_t                     buttons;                               ///< Buttons state (one byte per button)
     bool                         led1_mira;                             ///< Whether the status LED should mira
     bool                         client_connected;
@@ -63,8 +65,9 @@ void mira_event_callback(mr_event_t event, mr_event_data_t event_data) {
     switch (event) {
         case MIRA_NEW_PACKET:
         {
-            memcpy(_gw_vars.radio_packet.buffer, event_data.data.new_packet.header, sizeof(mr_packet_header_t));
-            memcpy(_gw_vars.radio_packet.buffer + sizeof(mr_packet_header_t), event_data.data.new_packet.payload, event_data.data.new_packet.payload_len);
+            _gw_vars.radio_packet.buffer[0] = MIRA_EDGE_DATA;
+            memcpy(_gw_vars.radio_packet.buffer + 1, event_data.data.new_packet.header, sizeof(mr_packet_header_t));
+            memcpy(_gw_vars.radio_packet.buffer + 1 + sizeof(mr_packet_header_t), event_data.data.new_packet.payload, event_data.data.new_packet.payload_len);
             _gw_vars.radio_packet.length   = sizeof(mr_packet_header_t) + event_data.data.new_packet.payload_len;
             _gw_vars.radio_packet_received = true;
             break;
@@ -74,11 +77,20 @@ void mira_event_callback(mr_event_t event, mr_event_data_t event_data) {
             uint64_t joined_nodes[MIRA_MAX_NODES] = { 0 };
             uint8_t joined_nodes_len = mira_gateway_get_nodes(joined_nodes);
             printf("Number of connected nodes: %d\n", joined_nodes_len);
-            // TODO: send list of joined_nodes to Edge Gateway via UART
+            // send new joined node to Edge Gateway via UART
+            _gw_vars.node_state_change_packet.buffer[0] = MIRA_EDGE_NODE_JOINED;
+            memcpy(_gw_vars.node_state_change_packet.buffer + 1, &event_data.data.node_info.node_id, sizeof(uint64_t));
+            _gw_vars.node_state_change_packet.length = 1 + sizeof(uint64_t);
+            _gw_vars.node_state_change_packet_pending = true;
             break;
         case MIRA_NODE_LEFT:
             printf("Node left: %016llX, reason: %u\n", event_data.data.node_info.node_id, event_data.tag);
             printf("Number of connected nodes: %d\n", mira_gateway_count_nodes());
+            // inform Edge Gateway of node left via UART
+            _gw_vars.node_state_change_packet.buffer[0] = MIRA_EDGE_NODE_LEFT;
+            memcpy(_gw_vars.node_state_change_packet.buffer + 1, &event_data.data.node_info.node_id, sizeof(uint64_t));
+            _gw_vars.node_state_change_packet.length = 1 + sizeof(uint64_t);
+            _gw_vars.node_state_change_packet_pending = true;
             break;
         case MIRA_ERROR:
             printf("Error\n");
@@ -134,6 +146,13 @@ int main(void) {
     puts("Gateway is ready");
 
     while (1) {
+
+        if (_gw_vars.node_state_change_packet_pending) {
+            if (_gw_vars.client_connected) {
+                swarmit_uart_write(UART_INDEX, _gw_vars.node_state_change_packet.buffer, _gw_vars.node_state_change_packet.length);
+            }
+            _gw_vars.node_state_change_packet_pending = false;
+        }
 
         if (_gw_vars.radio_packet_received) {
             db_gpio_clear(&db_led2);
