@@ -50,7 +50,7 @@ typedef struct {
 
 //=========================== variables ========================================
 
-extern schedule_t schedule_minuscule, schedule_tiny, schedule_small, schedule_huge, schedule_only_beacons, schedule_only_beacons_optimized_scan;
+extern schedule_t schedule_minuscule, schedule_tiny, schedule_huge;
 static gateway_vars_t _gw_vars = { 0 };
 
 //=========================== callbacks ========================================
@@ -70,6 +70,14 @@ void mira_event_callback(mr_event_t event, mr_event_data_t event_data) {
             memcpy(_gw_vars.radio_packet.buffer + 1 + sizeof(mr_packet_header_t), event_data.data.new_packet.payload, event_data.data.new_packet.payload_len);
             _gw_vars.radio_packet.length   = sizeof(mr_packet_header_t) + event_data.data.new_packet.payload_len;
             _gw_vars.radio_packet_received = true;
+            break;
+        }
+        case MIRA_KEEPALIVE:
+        {
+            _gw_vars.node_state_change_packet.buffer[0] = MIRA_EDGE_KEEPALIVE;
+            memcpy(_gw_vars.node_state_change_packet.buffer + 1, &event_data.data.node_info.node_id, sizeof(uint64_t));
+            _gw_vars.node_state_change_packet.length    = 1 + sizeof(uint64_t);
+            _gw_vars.node_state_change_packet_pending   = true;
             break;
         }
         case MIRA_NODE_JOINED:
@@ -172,7 +180,7 @@ int main(void) {
             if (!_gw_vars.client_connected && _gw_vars.uart_packet.buffer[0] == 0xff) {
                 _gw_vars.client_connected = true;
                 puts("UART client connected");
-            } else if (_gw_vars.client_connected && _gw_vars.uart_packet.buffer[0] == 0xfe) {
+            } else if (_gw_vars.uart_packet.buffer[0] == 0xfe) {
                 _gw_vars.client_connected = false;
                 puts("UART client disconnected");
             } else {
