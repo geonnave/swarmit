@@ -81,27 +81,21 @@ void mira_event_callback(mr_event_t event, mr_event_data_t event_data) {
             break;
         }
         case MIRA_NODE_JOINED:
-            printf("New node joined: %016llX\n", event_data.data.node_info.node_id);
-            uint64_t joined_nodes[MIRA_MAX_NODES] = { 0 };
-            uint8_t joined_nodes_len = mira_gateway_get_nodes(joined_nodes);
-            printf("Number of connected nodes: %d\n", joined_nodes_len);
-            // send new joined node to Edge Gateway via UART
+            puts("#");
             _gw_vars.node_state_change_packet.buffer[0] = MIRA_EDGE_NODE_JOINED;
             memcpy(_gw_vars.node_state_change_packet.buffer + 1, &event_data.data.node_info.node_id, sizeof(uint64_t));
             _gw_vars.node_state_change_packet.length = 1 + sizeof(uint64_t);
             _gw_vars.node_state_change_packet_pending = true;
             break;
         case MIRA_NODE_LEFT:
-            printf("Node left: %016llX, reason: %u\n", event_data.data.node_info.node_id, event_data.tag);
-            printf("Number of connected nodes: %d\n", mira_gateway_count_nodes());
-            // inform Edge Gateway of node left via UART
+            puts("0");
             _gw_vars.node_state_change_packet.buffer[0] = MIRA_EDGE_NODE_LEFT;
             memcpy(_gw_vars.node_state_change_packet.buffer + 1, &event_data.data.node_info.node_id, sizeof(uint64_t));
             _gw_vars.node_state_change_packet.length = 1 + sizeof(uint64_t);
             _gw_vars.node_state_change_packet_pending = true;
             break;
         case MIRA_ERROR:
-            printf("Error\n");
+            puts("Error");
             break;
         default:
             break;
@@ -164,11 +158,6 @@ int main(void) {
 
         if (_gw_vars.radio_packet_received) {
             db_gpio_clear(&db_led2);
-            printf("Radio packet received (%d B): payload=", _gw_vars.radio_packet.length);
-            for (int i = 0; i < _gw_vars.radio_packet.length; i++) {
-                printf("%02X ", _gw_vars.radio_packet.buffer[i]);
-            }
-            printf("\n");
             if (_gw_vars.client_connected) {
                 swarmit_uart_write(UART_INDEX, _gw_vars.radio_packet.buffer, _gw_vars.radio_packet.length);
             }
@@ -180,6 +169,7 @@ int main(void) {
             if (!_gw_vars.client_connected && _gw_vars.uart_packet.buffer[0] == 0xff) {
                 _gw_vars.client_connected = true;
                 puts("UART client connected");
+
                 gateway_packet_t packet = { 0 };
                 packet.buffer[0] = MIRA_EDGE_GATEWAY_INFO;
                 size_t len = mr_build_uart_packet_gateway_info(packet.buffer + 1);
@@ -195,11 +185,6 @@ int main(void) {
                 header->version = MIRA_PROTOCOL_VERSION;
                 header->type = MIRA_PACKET_DATA;
                 memcpy(_gw_vars.uart_packet.buffer, header, sizeof(mr_packet_header_t));
-                printf("UART packet received (%d B): payload=", _gw_vars.uart_packet.length);
-                for (size_t i = 0; i < _gw_vars.uart_packet.length; i++) {
-                    printf("%02X ", _gw_vars.uart_packet.buffer[i]);
-                }
-                printf("\n");
                 mira_tx(_gw_vars.uart_packet.buffer, _gw_vars.uart_packet.length);
             }
             _gw_vars.uart_packet_received = false;
