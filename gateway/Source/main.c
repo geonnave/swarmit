@@ -180,6 +180,11 @@ int main(void) {
             if (!_gw_vars.client_connected && _gw_vars.uart_packet.buffer[0] == 0xff) {
                 _gw_vars.client_connected = true;
                 puts("UART client connected");
+                gateway_packet_t packet = { 0 };
+                packet.buffer[0] = MIRA_EDGE_GATEWAY_INFO;
+                size_t len = mr_build_uart_packet_gateway_info(packet.buffer + 1);
+                packet.length = 1 + len;
+                swarmit_uart_write(UART_INDEX, packet.buffer, packet.length);
             } else if (_gw_vars.uart_packet.buffer[0] == 0xfe) {
                 _gw_vars.client_connected = false;
                 puts("UART client disconnected");
