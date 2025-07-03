@@ -180,7 +180,6 @@ int main(void) {
                 puts("UART client disconnected");
             } else {
                 mr_packet_header_t *header = (mr_packet_header_t *)_gw_vars.uart_packet.buffer;
-                header->dst = MIRA_BROADCAST_ADDRESS;
                 header->src = db_device_id();
                 header->version = MIRA_PROTOCOL_VERSION;
                 header->type = MIRA_PACKET_DATA;
