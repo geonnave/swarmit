@@ -12,7 +12,7 @@ from pathlib import Path
 
 import click
 
-from .nrf_flash import (
+from swarmit.provision.nrf_flash import (
     do_daplink,
     do_daplink_if,
     do_jlink,

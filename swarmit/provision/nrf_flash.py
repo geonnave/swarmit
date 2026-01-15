@@ -180,7 +180,7 @@ def pick_last_jlink_snr(nrfjprog_opt=None):
 
     rc2, out2 = run([nrfjprog, "--ids"], timeout=10)
     ids = (
-        [l.strip() for l in out2.splitlines() if l.strip().isdigit()]
+        [line.strip() for line in out2.splitlines() if line.strip().isdigit()]
         if rc2 == 0
         else []
     )
@@ -206,9 +206,9 @@ def pick_matching_jlink_snr(
     rc2, out2 = run([nrfjprog, "--ids"], timeout=10)
     ids = (
         [
-            l.strip()
-            for l in out2.splitlines()
-            if l.strip().isdigit() and l.strip().startswith(sn_starting_digits)
+            line.strip()
+            for line in out2.splitlines()
+            if line.strip().isdigit() and line.strip().startswith(sn_starting_digits)
         ]
         if rc2 == 0
         else []
