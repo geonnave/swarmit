@@ -10,30 +10,17 @@ from pathlib import Path
 
 import click
 
-try:
-    from .nrf_flash import (
-        do_daplink,
-        do_daplink_if,
-        do_jlink,
-        flash_nrf_both_cores,
-        flash_nrf_one_core,
-        pick_last_jlink_snr,
-        pick_matching_jlink_snr,
-        read_device_id,
-        read_net_id,
-    )
-except ImportError:  # allow running as a script
-    from nrf_flash import (
-        do_daplink,
-        do_daplink_if,
-        do_jlink,
-        flash_nrf_both_cores,
-        flash_nrf_one_core,
-        pick_last_jlink_snr,
-        pick_matching_jlink_snr,
-        read_device_id,
-        read_net_id,
-    )
+from .nrf_flash import (
+    do_daplink,
+    do_daplink_if,
+    do_jlink,
+    flash_nrf_both_cores,
+    flash_nrf_one_core,
+    pick_last_jlink_snr,
+    pick_matching_jlink_snr,
+    read_device_id,
+    read_net_id,
+)
 
 try:
     from intelhex import IntelHex
@@ -195,13 +182,13 @@ def manifest_matches(
     )
 
 
-@click.group(help="Swarmit provisioning tool (skeleton).")
+@click.group(help="Swarmit provisioning tool.")
 def cli() -> None:
     pass
 
 
 @cli.command(
-    "fetch", help="Fetch firmware assets into bin/<fw-version>/ (skeleton)."
+    "fetch", help="Fetch firmware assets into bin/<fw-version>/."
 )
 @click.option(
     "--fw-version",
@@ -275,7 +262,7 @@ def cmd_fetch(fw_version: str, local_root: Path | None, bin_dir: Path) -> None:
 
 @cli.command(
     "flash",
-    help="Flash firmware + config using versioned bin layout (skeleton).",
+    help="Flash firmware + config using versioned bin layout.",
 )
 @click.option(
     "--device", "-d", type=click.Choice(VALID_DEVICES), required=True
@@ -433,7 +420,7 @@ def cmd_flash(
     click.echo(f"[INFO] readback device_id: {readback_device_id}")
 
 
-@cli.command("flash-hex", help="Flash explicit app/net hex files (skeleton).")
+@cli.command("flash-hex", help="Flash explicit app/net hex files.")
 @click.option(
     "--app", "app_hex", type=click.Path(path_type=Path, dir_okay=False)
 )
@@ -449,7 +436,7 @@ def cmd_flash_hex(app_hex: Path | None, net_hex: Path | None) -> None:
         click.echo(f"[TODO] flash net core: {net_hex}")
 
 
-@cli.command("read-config", help="Read config from the device (skeleton).")
+@cli.command("read-config", help="Read config from the device.")
 @click.option(
     "--sn-starting-digits",
     "-s",
@@ -477,7 +464,7 @@ def cmd_read_config(sn_starting_digits: str | None) -> None:
 
 @cli.command(
     "flash-bringup",
-    help="Flash J-Link OB or DAPLink programmer firmware (skeleton).",
+    help="Flash J-Link OB or DAPLink programmer firmware.",
 )
 @click.option(
     "--programmer-firmware",
