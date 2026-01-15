@@ -6,6 +6,8 @@ import os
 import shutil
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import click
@@ -38,6 +40,7 @@ VALID_PROGRAMMERS = ("jlink", "daplink")
 CONFIG_ADDR = 0x0103F800
 CONFIG_MAGIC = 0x5753524D
 CONFIG_MANIFEST_NAME = "config-manifest.json"
+RELEASE_BASE_URL = "https://github.com/DotBots/swarmit/releases/download"
 # Programmer bring-up files
 GEEHY_PACK_NAME = "Geehy.APM32F1xx_DFP.1.1.0.pack"
 JLINK_REQUIRED_FILES = ("JLink-ob.bin", "stm32f103xb_bl.hex", GEEHY_PACK_NAME)
@@ -100,6 +103,29 @@ def normalize_network_id(raw: str | None) -> tuple[int, str] | None:
 
 def resolve_fw_root(bin_dir: Path, fw_version: str) -> Path:
     return bin_dir / fw_version
+
+
+def download_file(url: str, dest: Path) -> None:
+    click.echo(f"[GET ] {url}")
+    try:
+        with urllib.request.urlopen(url) as resp:
+            status = getattr(resp, "status", 200)
+            if status != 200:
+                raise click.ClickException(
+                    f"HTTP {status} while downloading {url}"
+                )
+            data = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise click.ClickException(
+            f"HTTP error while downloading {url}: {exc}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise click.ClickException(
+            f"Network error while downloading {url}: {exc}"
+        ) from exc
+
+    dest.write_bytes(data)
+    click.echo(f"[OK  ] wrote {dest} ({len(data)} bytes)")
 
 
 def find_existing_config_hex(fw_root: Path) -> Path | None:
@@ -187,9 +213,7 @@ def cli() -> None:
     pass
 
 
-@cli.command(
-    "fetch", help="Fetch firmware assets into bin/<fw-version>/."
-)
+@cli.command("fetch", help="Fetch firmware assets into bin/<fw-version>/.")
 @click.option(
     "--fw-version",
     "-f",
@@ -255,9 +279,16 @@ def cmd_fetch(fw_version: str, local_root: Path | None, bin_dir: Path) -> None:
                 click.echo(f"[COPY] {dest} <- {src}")
         return
 
-    click.echo(
-        "[TODO] download assets from GitHub releases for remote versions"
-    )
+    assets = [
+        "bootloader-dotbot-v3.hex",
+        "netcore-nrf5340-net.hex",
+        "03app_gateway_app-nrf5340-app.hex",
+        "03app_gateway_net-nrf5340-net.hex",
+    ]
+    for name in assets:
+        url = f"{RELEASE_BASE_URL}/{fw_version}/{name}"
+        dest = out_dir / name
+        download_file(url, dest)
 
 
 @cli.command(
