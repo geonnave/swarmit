@@ -2,12 +2,9 @@
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
-
-import click
 
 # Timings
 POLL_INTERVAL = 1.0
@@ -208,7 +205,8 @@ def pick_matching_jlink_snr(
         [
             line.strip()
             for line in out2.splitlines()
-            if line.strip().isdigit() and line.strip().startswith(sn_starting_digits)
+            if line.strip().isdigit()
+            and line.strip().startswith(sn_starting_digits)
         ]
         if rc2 == 0
         else []

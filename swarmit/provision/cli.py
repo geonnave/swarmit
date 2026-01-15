@@ -208,7 +208,9 @@ def manifest_matches(
     )
 
 
-@click.group(help="Swarmit provisioning tool.")
+@click.group(
+    help="A tool for provisioning DotBot devices and gateways in the context of a SwarmIT-enabled testbed."
+)
 def cli() -> None:
     pass
 

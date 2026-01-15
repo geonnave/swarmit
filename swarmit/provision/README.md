@@ -1,58 +1,54 @@
-# Swarmit Provisioning (Skeleton)
+# `swarmit-provision`
 
-This directory contains a Click-based CLI skeleton for provisioning DotBot devices and gateways.
+A command-line tool for provisioning DotBot devices and gateways.
 
-## Commands
+```
+Usage: swarmit-provision [OPTIONS] COMMAND [ARGS]...
 
-### Fetch firmware assets
+  A tool for provisioning DotBot devices and gateways in the context of a
+  SwarmIT-enabled testbed.
 
-Download firmware into `bin/<fw-version>/`:
+Options:
+  --help  Show this message and exit.
+
+Commands:
+  fetch          Fetch firmware assets into bin/<fw-version>/.
+  flash          Flash firmware + config using versioned bin layout.
+  flash-bringup  Flash J-Link OB or DAPLink programmer firmware.
+  flash-hex      Flash explicit app/net hex files.
+  read-config    Read config from the device.
+```
+
+## Deploying a testbed
+
+First, download firmware assets:
 
 ```bash
-swarmit-provision fetch --fw-version v0.6.0
+swarmit-provision fetch --fw-version v0.7.0
 ```
 
-Use local artifacts (e.g. for dev builds):
+Then, to flash a DotBot-v3 while specifying a certain Network ID:
 
 ```bash
-swarmit-provision fetch --fw-version local --local-root /path/to/swarmit
+swarmit-provision flash --device dotbot-v3 --fw-version v0.7.0 --network-id 0100
 ```
 
-### Provision devices
-
-Flash app + net cores and write config:
+And to flash a Mari Gateway:
 
 ```bash
-swarmit-provision flash --device dotbot-v3 --fw-version v0.6.0 --network-id 0100
+swarmit-provision flash --device gateway --fw-version v0.7.0 --network-id 0100
 ```
 
-Use a TOML config:
+... and it's done!
 
-```toml
-[provisioning]
-network_id = "0100"
-firmware_version = "v0.6.0"
-```
+## Deploying a testbed on fresh robots
+
+If your robot just arrived from factory, first you have to run the `flash-bringup` command.
+You can concatenate it with a regular `flash` command so that all happens in sequence with minimal manual work.
+Like this:
 
 ```bash
-swarmit-provision flash --device dotbot-v3 --config provision-config-sample.toml --fw-version v0.6.1
+swarmit-provision flash-bringup --programmer-firmware jlink -d ../../../programer-files-dotbot && \
+  swarmit-provision flash -d dotbot-v3 -f local -n 0100 -s 77
 ```
-
-### Flash explicit hex files
-
-```bash
-swarmit-provision flash-hex --app path/to/app.hex --net path/to/net.hex
-```
-
-### Programmer bring-up (J-Link OB / DAPLink)
-
-```bash
-swarmit-provision flash-bringup --programmer jlink --files-dir ../dotbot-programmer-fw/
-swarmit-provision flash-bringup --programmer daplink --files-dir ../dotbot-programmer-fw/
-```
-
-## Notes
-
-- This is a skeleton. Each command prints TODOs and validates inputs.
-- `flash` will later create a temporary config hex (e.g. `/tmp/config-dotbot-v3-v0.6.0-0100.hex`) and use `nrfutil` to program it.
-- `tomllib` is used for parsing TOML (Python 3.11+). If you are on an older Python, install `tomli`.
+... where the `-s` flag stands for `--sn-starting-digits` and serves as a pattern to identify the connected programming probe. In this case it solves a problem where the flash command incorrectly selects the external J-Link probe instead of the dotbot's (most DotBots come from factory with a serial number starting by 77).
