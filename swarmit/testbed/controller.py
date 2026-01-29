@@ -10,7 +10,8 @@ from cryptography.hazmat.primitives import hashes
 from dotbot_utils.protocol import Packet, Payload
 from dotbot_utils.serial_interface import get_default_port
 from rich import print
-from rich.console import Group
+from rich.columns import Columns
+from rich.console import Console, Group
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
@@ -135,39 +136,52 @@ def generate_status(status_data, devices=[], status_message="found"):
         f"\n{len(data)} device{'s' if len(data) > 1 else ''} {status_message}\n"
     )
 
-    table = Table()
-    table.add_column("Device Addr", style="magenta", no_wrap=True)
-    table.add_column(
-        "Type",
-        style="cyan",
-        justify="center",
-    )
-    table.add_column(
-        "Battery",
-        style="cyan",
-        justify="center",
-    )
-    table.add_column(
-        "Position",
-        style="cyan",
-        justify="center",
-    )
-    table.add_column(
-        "Status",
-        style="green",
-        justify="center",
-        width=max([len(m) for m in StatusType.__members__]),
-    )
-    for device_addr, device_data in sorted(data.items()):
-
-        table.add_row(
-            f"{device_addr}",
-            f"{device_data.device.name}",
-            f"[{battery_level_color(device_data.battery)}]{device_data.battery / 1000:.2f}V ({int(device_data.battery / 3000 * 100)}%)",
-            f"({(device_data.pos_x / 1e6):.2f}, {(device_data.pos_y / 1e6):.2f})",
-            f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
+    def build_table(rows):
+        table = Table()
+        table.add_column("Device Addr", style="magenta", no_wrap=True)
+        table.add_column(
+            "Type",
+            style="cyan",
+            justify="center",
         )
-    return Group(header, table)
+        table.add_column(
+            "Battery",
+            style="cyan",
+            justify="center",
+        )
+        table.add_column(
+            "Position",
+            style="cyan",
+            justify="center",
+        )
+        table.add_column(
+            "Status",
+            style="green",
+            justify="center",
+            width=max([len(m) for m in StatusType.__members__]),
+        )
+        for device_addr, device_data in rows:
+            table.add_row(
+                f"{device_addr}",
+                f"{device_data.device.name}",
+                f"[{battery_level_color(device_data.battery)}]{device_data.battery / 1000:.2f}V ({int(device_data.battery / 3000 * 100)}%)",
+                f"({(device_data.pos_x / 1e6):.2f}, {(device_data.pos_y / 1e6):.2f})",
+                f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
+            )
+        return table
+
+    items = sorted(data.items())
+    console = Console()
+    header_lines = 2
+    table_overhead = 4
+    max_rows = max(1, console.size.height - header_lines - table_overhead)
+    if len(items) <= max_rows:
+        return Group(header, build_table(items))
+
+    tables = []
+    for idx in range(0, len(items), max_rows):
+        tables.append(build_table(items[idx : idx + max_rows]))
+    return Group(header, Columns(tables, expand=True, equal=True))
 
 
 def print_transfer_status(
