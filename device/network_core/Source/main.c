@@ -319,21 +319,29 @@ int main(void) {
                     }
 
                     const swrmt_ota_chunk_pkt_t *pkt = (const swrmt_ota_chunk_pkt_t *)req->data;
-                    ipc_shared_data.ota.chunk_index = pkt->index;
 
-                    // Check chunk index is valid
-                    if (ipc_shared_data.ota.chunk_index >= ipc_shared_data.ota.chunk_count) {
-                        printf("Invalid chunk index %u\n", ipc_shared_data.ota.chunk_index);
+                    // Check chunk index is valid. Compare against pkt directly so
+                    // the bound is unaffected by any concurrent IPC chunk_index write.
+                    if (pkt->index >= ipc_shared_data.ota.chunk_count) {
+                        printf("Invalid chunk index %u\n", pkt->index);
                         break;
                     }
 
-                    // Only check for matching sha if chunk was not already acked
-                    if (ipc_shared_data.ota.last_chunk_acked != (int32_t)ipc_shared_data.ota.chunk_index) {
-                        printf("Verify SHA for chunk %u: ", ipc_shared_data.ota.chunk_index);
-                        ipc_shared_data.ota.chunk_size = pkt->chunk_size;
-                        mutex_lock();
+                    bool need_verify = (ipc_shared_data.ota.last_chunk_acked != (int32_t)pkt->index);
+
+                    // Publish chunk_index + chunk_size + chunk buffer atomically so
+                    // the bootloader sees a consistent (index, size, buffer) view
+                    // even when chunks arrive back-to-back.
+                    mutex_lock();
+                    ipc_shared_data.ota.chunk_index = pkt->index;
+                    ipc_shared_data.ota.chunk_size  = pkt->chunk_size;
+                    if (need_verify) {
                         memcpy((uint8_t *)ipc_shared_data.ota.chunk, pkt->chunk, pkt->chunk_size);
-                        mutex_unlock();
+                    }
+                    mutex_unlock();
+
+                    if (need_verify) {
+                        printf("Verify SHA for chunk %u: ", pkt->index);
 
                         // Copy expected hash
                         memcpy(_app_vars.expected_hash, pkt->sha, SWRMT_OTA_SHA256_LENGTH);
@@ -351,7 +359,7 @@ int main(void) {
                         }
                         puts("OK");
                     }
-                    printf("Process OTA chunk request (index: %u, size: %u)\n", ipc_shared_data.ota.chunk_index, ipc_shared_data.ota.chunk_size);
+                    printf("Process OTA chunk request (index: %u, size: %u)\n", pkt->index, pkt->chunk_size);
                     NRF_IPC_NS->TASKS_SEND[IPC_CHAN_OTA_CHUNK] = 1;
                 } break;
                 case SWRMT_MSG_LH2_CALIBRATION:
