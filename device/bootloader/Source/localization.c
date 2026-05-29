@@ -66,8 +66,10 @@ bool localization_get_position(position_2d_t *position) {
         }
         db_lh2_start();
 
-        if (_localization_data.coordinates[0] < 0 || _localization_data.coordinates[0] > 100000 || _localization_data.coordinates[1] < 0 || _localization_data.coordinates[1] > 100000) {
-            printf("Invalid position (%u,%u)\n", _localization_data.position.x, _localization_data.position.y);
+        double cx = _localization_data.coordinates[0];
+        double cy = _localization_data.coordinates[1];
+        if (!isfinite(cx) || !isfinite(cy) || cx < 0 || cx > 100000 || cy < 0 || cy > 100000) {
+            printf("Invalid position (cx=%f, cy=%f)\n", cx, cy);
             return false;
         }
 
