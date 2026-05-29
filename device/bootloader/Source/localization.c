@@ -69,7 +69,10 @@ bool localization_get_position(position_2d_t *position) {
         double cx = _localization_data.coordinates[0];
         double cy = _localization_data.coordinates[1];
         if (!isfinite(cx) || !isfinite(cy) || cx < 0 || cx > 100000 || cy < 0 || cy > 100000) {
-            printf("Invalid position (cx=%f, cy=%f)\n", cx, cy);
+            // No %f here: the bootloader's `linker_printf_fp_enabled=Float`
+            // formatter misbehaves on NaN/Inf, and this branch fires on
+            // exactly those values.
+            puts("Invalid LH2 position (non-finite or out-of-range)");
             return false;
         }
 
