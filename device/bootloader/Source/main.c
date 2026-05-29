@@ -409,6 +409,9 @@ int main(void) {
         if (_bootloader_vars.ota_chunk_request) {
             _bootloader_vars.ota_chunk_request = false;
 
+            // Serialize with netcore's OTA chunk writes so that chunk_index, chunk_size,
+            // and the chunk buffer can't be mutated mid-flash by a back-to-back chunk.
+            mutex_lock();
             if (ipc_shared_data.ota.last_chunk_acked != (int32_t)ipc_shared_data.ota.chunk_index) {
                 // Write chunk to flash
                 uint32_t addr = _bootloader_vars.base_addr + ipc_shared_data.ota.chunk_index * SWRMT_OTA_CHUNK_SIZE;
@@ -423,12 +426,14 @@ int main(void) {
             memcpy(_bootloader_vars.notification_buffer + length, (void *)&ipc_shared_data.ota.chunk_index, sizeof(uint32_t));
             length += sizeof(uint32_t);
             ipc_shared_data.ota.last_chunk_acked = ipc_shared_data.ota.chunk_index;
-            mari_node_tx(_bootloader_vars.notification_buffer, length);
 
             // If last chunk, finalize computed hash, set back to ready state
             if (ipc_shared_data.ota.chunk_index == ipc_shared_data.ota.chunk_count - 1) {
                 ipc_shared_data.status = SWRMT_APPLICATION_READY;
             }
+            mutex_unlock();
+
+            mari_node_tx(_bootloader_vars.notification_buffer, length);
         }
 
         if (_bootloader_vars.start_application) {
