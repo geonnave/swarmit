@@ -436,6 +436,11 @@ int main(void) {
                 default:
                     break;
             }
+            // Ensure prior payload writes (tx_pdu, rng.value, …) are observable
+            // to the app core before it sees the net_ack release-store. On the
+            // dual-M33 nRF5340, volatile alone does not order across the AXI
+            // fabric.
+            __DMB();
             ipc_shared_data.net_ack = true;
             _app_vars.ipc_req      = IPC_REQ_NONE;
         }
