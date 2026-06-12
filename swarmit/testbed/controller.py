@@ -24,6 +24,7 @@ from swarmit.testbed.adapter import (
 from swarmit.testbed.logger import LOGGER
 from swarmit.testbed.protocol import (
     DeviceType,
+    FaultType,
     PayloadCalibrationData,
     PayloadLH2Capture,
     PayloadMessage,
@@ -34,6 +35,7 @@ from swarmit.testbed.protocol import (
     PayloadStop,
     PayloadType,
     StatusType,
+    decode_reset_reason,
 )
 
 CHUNK_SIZE = 128
@@ -61,6 +63,12 @@ class NodeStatus:
     battery: int = 0
     pos_x: int = 0
     pos_y: int = 0
+    reset_reason: int = 0
+    fault: int = 0
+    cfsr: int = 0
+    sfsr: int = 0
+    pc: int = 0
+    lr: int = 0
     last_updated_at: float = 0
 
 
@@ -129,6 +137,27 @@ def battery_level_color(level: int):
     return "red"
 
 
+def format_reset_cause(device_data) -> str:
+    """Format the last reset cause of a node, including any latched fault."""
+    text = decode_reset_reason(device_data.reset_reason)
+    if device_data.fault:
+        try:
+            fault_name = FaultType(device_data.fault).name
+        except ValueError:
+            fault_name = f"fault {device_data.fault}"
+        text += f" ({fault_name} pc=0x{device_data.pc:08x})"
+    return text
+
+
+def reset_cause_color(device_data) -> str:
+    suspicious = (
+        device_data.fault
+        # watchdog0, lockup, watchdog1
+        or device_data.reset_reason & ((1 << 1) | (1 << 4) | (1 << 25))
+    )
+    return "red" if suspicious else "cyan"
+
+
 def generate_status(status_data, devices=[], status_message="found"):
     data = {
         addr: device_data
@@ -165,6 +194,11 @@ def generate_status(status_data, devices=[], status_message="found"):
         justify="center",
         width=max([len(m) for m in StatusType.__members__]),
     )
+    table.add_column(
+        "Last reset",
+        style="cyan",
+        justify="center",
+    )
     for device_addr, device_data in sorted(data.items()):
 
         table.add_row(
@@ -173,6 +207,7 @@ def generate_status(status_data, devices=[], status_message="found"):
             f"[{battery_level_color(device_data.battery)}]{device_data.battery / 1000:.2f}V ({int(device_data.battery / 3000 * 100)}%)",
             f"({device_data.pos_x}, {device_data.pos_y})",
             f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
+            f"[{reset_cause_color(device_data)}]{format_reset_cause(device_data)}",
         )
     return Group(header, table)
 
@@ -384,6 +419,12 @@ class Controller:
                 battery=packet.payload.battery,
                 pos_x=packet.payload.pos_x,
                 pos_y=packet.payload.pos_y,
+                reset_reason=packet.payload.reset_reason,
+                fault=packet.payload.fault,
+                cfsr=packet.payload.cfsr,
+                sfsr=packet.payload.sfsr,
+                pc=packet.payload.pc,
+                lr=packet.payload.lr,
                 last_updated_at=now,
             )
             self.status_data.update({device_addr: status})

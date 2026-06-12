@@ -67,6 +67,52 @@ class PayloadType(IntEnum):
 LH2_CALIB_TAG = 0xCA
 
 
+class FaultType(Enum):
+    """Fault latched by the bootloader before the reset."""
+
+    NoFault = 0
+    HardFault = 1
+    SecureFault = 2
+
+
+# nRF5340 application core RESETREAS flags (bit position -> short label).
+RESET_REASON_FLAGS = {
+    1 << 0: "pin",
+    1 << 1: "watchdog0",
+    1 << 2: "ctrl-ap",
+    1 << 3: "soft-reset",
+    1 << 4: "lockup",
+    1 << 5: "off-wakeup",
+    1 << 6: "lpcomp",
+    1 << 7: "debug-if",
+    1 << 24: "nfc",
+    1 << 25: "watchdog1",
+    1 << 26: "vbus",
+}
+
+
+def decode_reset_reason(reset_reason: int) -> str:
+    """Decode a RESETREAS register value into a short readable string."""
+    if reset_reason == 0:
+        return "power-on"
+    labels = [
+        label
+        for mask, label in RESET_REASON_FLAGS.items()
+        if reset_reason & mask
+    ]
+    unknown = reset_reason & ~sum(RESET_REASON_FLAGS)
+    if unknown:
+        labels.append(f"0x{unknown:08x}")
+    return "+".join(labels)
+
+
+# Size of the status payload sent by firmware without crash-report support.
+STATUS_LEGACY_SIZE = 12
+# Size of the crash report appended to status payloads (mirrors
+# ipc_crash_report_t in the swarmit firmware).
+CRASH_REPORT_SIZE = 21
+
+
 # Requests
 @dataclass
 class PayloadStatus(Payload):
@@ -83,6 +129,12 @@ class PayloadStatus(Payload):
             PayloadFieldMetadata(
                 name="pos_y", disp="pos y", length=4, signed=True
             ),
+            PayloadFieldMetadata(name="reset_reason", disp="rst", length=4),
+            PayloadFieldMetadata(name="fault", disp="fault"),
+            PayloadFieldMetadata(name="cfsr", disp="cfsr", length=4),
+            PayloadFieldMetadata(name="sfsr", disp="sfsr", length=4),
+            PayloadFieldMetadata(name="pc", disp="pc", length=4),
+            PayloadFieldMetadata(name="lr", disp="lr", length=4),
         ]
     )
 
@@ -91,6 +143,20 @@ class PayloadStatus(Payload):
     battery: int = 0
     pos_x: int = 0
     pos_y: int = 0
+    reset_reason: int = 0
+    fault: int = 0
+    cfsr: int = 0
+    sfsr: int = 0
+    pc: int = 0
+    lr: int = 0
+
+    def from_bytes(self, bytes_):
+        # Firmware without crash-report support sends the legacy short
+        # payload; parse it with a zeroed crash report so mixed fleets keep
+        # reporting status during the bootloader rollout.
+        if len(bytes_) == STATUS_LEGACY_SIZE:
+            bytes_ = bytes(bytes_) + bytes(CRASH_REPORT_SIZE)
+        return super().from_bytes(bytes_)
 
 
 @dataclass
