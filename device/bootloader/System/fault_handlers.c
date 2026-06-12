@@ -10,7 +10,24 @@
  */
 
 #include <nrf.h>
+#include "crash_latch.h"
 #include "fault_handlers.h"
+
+volatile crash_latch_t crash_latch __attribute__((section(".non_init")));
+
+void crash_latch_fault(uint32_t fault, uint32_t *sp) {
+    crash_latch.fault = fault;
+    crash_latch.cfsr  = SCB->CFSR;
+    crash_latch.sfsr  = SCB->SFSR;
+    crash_latch.pc    = 0;
+    crash_latch.lr    = 0;
+    // Magic is set before touching the stacked frame: reading it can fault
+    // again (e.g. after a stacking error), in which case the latch stays
+    // valid with pc/lr zeroed.
+    crash_latch.magic = CRASH_LATCH_MAGIC;
+    crash_latch.lr    = sp[5];
+    crash_latch.pc    = sp[6];
+}
 
 void HardFaultHandler(uint32_t *sp) {
     if (SCB->HFSR & (SCB_HFSR_DEBUGEVT_Msk)) {
@@ -18,6 +35,7 @@ void HardFaultHandler(uint32_t *sp) {
         *(sp + 6u) += 2u;                           // PC is located on stack at SP + 24 bytes. Increment PC by 2 to skip break instruction.
         return;                                     // Return to interrupted application
     }
+    crash_latch_fault(CRASH_FAULT_HARD, sp);
 #if defined(DEBUG)
     hardfault_regs.shcsr.word    = SCB->SHCSR;  // System Handler Control and State Register
     hardfault_regs.mmfsr.byte    = (uint8_t)(SCB->SHCSR & 0xFF);   // MemManage Fault Status Register
@@ -46,6 +64,7 @@ void HardFaultHandler(uint32_t *sp) {
 
 
 void SecureFaultHandler(uint32_t* sp) {
+    crash_latch_fault(CRASH_FAULT_SECURE, sp);
 #if defined(DEBUG)
     securefault_reg.sfsr.word    = SCB->SFSR;   // System Handler Control and State Register
     hardfault_regs.regs.r0       = sp[0];       // Register R0

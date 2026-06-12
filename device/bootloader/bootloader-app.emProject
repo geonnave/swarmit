@@ -37,6 +37,7 @@
     <folder Name="System">
       <file file_name="System/clock.c" />
       <file file_name="System/clock.h" />
+      <file file_name="System/crash_latch.h" />
       <file file_name="System/fault_handlers.c" />
       <file file_name="System/fault_handlers.h" />
       <file file_name="System/startup.c" />
