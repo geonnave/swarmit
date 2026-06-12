@@ -258,5 +258,11 @@ def _parse_node_status(d: dict) -> NodeStatus:
         battery=d["battery"],
         pos_x=d["pos_x"],
         pos_y=d["pos_y"],
+        reset_reason=d.get("reset_reason", 0),
+        fault=d.get("fault", 0),
+        cfsr=d.get("cfsr", 0),
+        sfsr=d.get("sfsr", 0),
+        pc=d.get("pc", 0),
+        lr=d.get("lr", 0),
         last_updated_at=d["last_updated_at"],
     )
