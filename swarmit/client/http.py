@@ -265,5 +265,6 @@ def _parse_node_status(d: dict) -> NodeStatus:
         sfsr=d.get("sfsr", 0),
         pc=d.get("pc", 0),
         lr=d.get("lr", 0),
+        raw=d.get("raw", ""),
         last_updated_at=d["last_updated_at"],
     )

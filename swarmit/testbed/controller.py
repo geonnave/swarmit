@@ -72,6 +72,7 @@ class NodeStatus:
     sfsr: int = 0
     pc: int = 0
     lr: int = 0
+    raw: str = ""  # hex of the full status packet as received
     last_updated_at: float = 0
 
 
@@ -308,6 +309,13 @@ def generate_inspect(status_data, devices=[]):
             elf = "app image" if d.from_ns else "bootloader image"
             table.add_row("  pc", f"0x{d.pc:08x}  (resolve against {elf})")
             table.add_row("  lr", f"0x{d.lr:08x}")
+
+        if d.raw:
+            spaced = " ".join(
+                d.raw[i : i + 2] for i in range(0, len(d.raw), 2)
+            )
+            table.add_row("", "")
+            table.add_row("Raw status pkt", spaced)
         panels.append(table)
         panels.append(Text(""))
     return Group(*panels)
@@ -527,6 +535,7 @@ class Controller:
                 sfsr=packet.payload.sfsr,
                 pc=packet.payload.pc,
                 lr=packet.payload.lr,
+                raw=packet.to_bytes().hex(),
                 last_updated_at=now,
             )
             self.status_data.update({device_addr: status})
