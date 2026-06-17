@@ -326,11 +326,12 @@ int main(void) {
     // the previous run latched one before the watchdog fired.
     ipc_shared_data.crash_report.reset_reason = resetreas;
     if (crash_latch.magic == CRASH_LATCH_MAGIC) {
-        ipc_shared_data.crash_report.fault = (uint8_t)crash_latch.fault;
-        ipc_shared_data.crash_report.cfsr  = crash_latch.cfsr;
-        ipc_shared_data.crash_report.sfsr  = crash_latch.sfsr;
-        ipc_shared_data.crash_report.pc    = crash_latch.pc;
-        ipc_shared_data.crash_report.lr    = crash_latch.lr;
+        ipc_shared_data.crash_report.fault   = (uint8_t)crash_latch.fault;
+        ipc_shared_data.crash_report.from_ns = (uint8_t)crash_latch.from_ns;
+        ipc_shared_data.crash_report.cfsr    = crash_latch.cfsr;
+        ipc_shared_data.crash_report.sfsr    = crash_latch.sfsr;
+        ipc_shared_data.crash_report.pc      = crash_latch.pc;
+        ipc_shared_data.crash_report.lr      = crash_latch.lr;
     }
     crash_latch.magic = 0;
 

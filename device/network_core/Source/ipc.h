@@ -84,6 +84,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint32_t reset_reason;  ///< RESETREAS value captured at boot (0 means power-on)
     uint8_t  fault;         ///< Fault latched before the reset (0: none, 1: hard fault, 2: secure fault)
+    uint8_t  from_ns;       ///< 1 if the faulting context was non-secure (PC resolves against the app image)
     uint32_t cfsr;          ///< Configurable Fault Status Register at fault
     uint32_t sfsr;          ///< Secure Fault Status Register at fault
     uint32_t pc;            ///< Stacked program counter at fault

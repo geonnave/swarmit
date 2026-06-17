@@ -158,7 +158,7 @@ static struct {
 } securefault_reg;
 #endif
 
-void HardFaultHandler(uint32_t* sp);
-void SecureFaultHandler(uint32_t* sp);
+void HardFaultHandler(uint32_t* sp, uint32_t exc_return);
+void SecureFaultHandler(uint32_t* sp, uint32_t exc_return);
 
 #endif // __FAULT_HANDLERS_H

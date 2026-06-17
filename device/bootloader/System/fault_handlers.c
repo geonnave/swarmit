@@ -15,12 +15,13 @@
 
 volatile crash_latch_t crash_latch __attribute__((section(".non_init")));
 
-void crash_latch_fault(uint32_t fault, uint32_t *sp) {
-    crash_latch.fault = fault;
-    crash_latch.cfsr  = SCB->CFSR;
-    crash_latch.sfsr  = SCB->SFSR;
-    crash_latch.pc    = 0;
-    crash_latch.lr    = 0;
+void crash_latch_fault(uint32_t fault, uint32_t *sp, uint32_t exc_return) {
+    crash_latch.fault   = fault;
+    crash_latch.from_ns = (exc_return & (1u << 6)) ? 0u : 1u;  // EXC_RETURN.S clear => non-secure background
+    crash_latch.cfsr    = SCB->CFSR;
+    crash_latch.sfsr    = SCB->SFSR;
+    crash_latch.pc      = 0;
+    crash_latch.lr      = 0;
     // Magic is set before touching the stacked frame: reading it can fault
     // again (e.g. after a stacking error), in which case the latch stays
     // valid with pc/lr zeroed.
@@ -29,13 +30,13 @@ void crash_latch_fault(uint32_t fault, uint32_t *sp) {
     crash_latch.pc    = sp[6];
 }
 
-void HardFaultHandler(uint32_t *sp) {
+void HardFaultHandler(uint32_t *sp, uint32_t exc_return) {
     if (SCB->HFSR & (SCB_HFSR_DEBUGEVT_Msk)) {
         SCB->HFSR |=  (SCB_HFSR_DEBUGEVT_Msk);      // Reset Hard Fault status
         *(sp + 6u) += 2u;                           // PC is located on stack at SP + 24 bytes. Increment PC by 2 to skip break instruction.
         return;                                     // Return to interrupted application
     }
-    crash_latch_fault(CRASH_FAULT_HARD, sp);
+    crash_latch_fault(CRASH_FAULT_HARD, sp, exc_return);
 #if defined(DEBUG)
     hardfault_regs.shcsr.word    = SCB->SHCSR;  // System Handler Control and State Register
     hardfault_regs.mmfsr.byte    = (uint8_t)(SCB->SHCSR & 0xFF);   // MemManage Fault Status Register
@@ -63,8 +64,8 @@ void HardFaultHandler(uint32_t *sp) {
 }
 
 
-void SecureFaultHandler(uint32_t* sp) {
-    crash_latch_fault(CRASH_FAULT_SECURE, sp);
+void SecureFaultHandler(uint32_t* sp, uint32_t exc_return) {
+    crash_latch_fault(CRASH_FAULT_SECURE, sp, exc_return);
 #if defined(DEBUG)
     securefault_reg.sfsr.word    = SCB->SFSR;   // System Handler Control and State Register
     hardfault_regs.regs.r0       = sp[0];       // Register R0

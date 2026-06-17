@@ -26,12 +26,13 @@ typedef enum {
 } crash_fault_t;
 
 typedef struct {
-    uint32_t magic;  ///< Equals CRASH_LATCH_MAGIC when the latch holds a valid snapshot
-    uint32_t fault;  ///< crash_fault_t value
-    uint32_t cfsr;   ///< Configurable Fault Status Register (MMFSR, BFSR, UFSR)
-    uint32_t sfsr;   ///< Secure Fault Status Register
-    uint32_t pc;     ///< Stacked program counter at fault (0 if unavailable)
-    uint32_t lr;     ///< Stacked link register at fault (0 if unavailable)
+    uint32_t magic;    ///< Equals CRASH_LATCH_MAGIC when the latch holds a valid snapshot
+    uint32_t fault;    ///< crash_fault_t value
+    uint32_t from_ns;  ///< 1 if the faulting context was non-secure (PC resolves against the app image)
+    uint32_t cfsr;     ///< Configurable Fault Status Register (MMFSR, BFSR, UFSR)
+    uint32_t sfsr;     ///< Secure Fault Status Register
+    uint32_t pc;       ///< Stacked program counter at fault (0 if unavailable)
+    uint32_t lr;       ///< Stacked link register at fault (0 if unavailable)
 } crash_latch_t;
 
 extern volatile crash_latch_t crash_latch;
@@ -39,9 +40,13 @@ extern volatile crash_latch_t crash_latch;
 /**
  * @brief Snapshot the current fault state into the crash latch
  *
- * @param[in]   fault   crash_fault_t value identifying the handler
- * @param[in]   sp      Stack pointer holding the exception stack frame
+ * @param[in]   fault       crash_fault_t value identifying the handler
+ * @param[in]   sp          Stack frame of the faulting context (already
+ *                          resolved to the secure or non-secure stack by the
+ *                          handler trampoline)
+ * @param[in]   exc_return  EXC_RETURN seen on handler entry; bit 6 (S) tells
+ *                          whether the faulting context was secure
  */
-void crash_latch_fault(uint32_t fault, uint32_t *sp);
+void crash_latch_fault(uint32_t fault, uint32_t *sp, uint32_t exc_return);
 
 #endif  // __CRASH_LATCH_H
