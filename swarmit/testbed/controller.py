@@ -167,12 +167,16 @@ def format_reset_cause(device_data) -> str:
     rr = device_data.reset_reason
     # Crash wins over everything: a stop racing a crash can set both bits.
     if device_data.fault or (rr & _RR_WDT0):
+        # Surface the raw reset reason too (watchdog0 for the crash deadman,
+        # lockup if the fault handler itself wedged) - it disambiguates the
+        # crash path at a glance.
+        reset_name = decode_reset_reason(rr)
         if device_data.fault:
             return (
-                f"crashed ({_fault_name(device_data)} "
+                f"crashed ({reset_name} {_fault_name(device_data)} "
                 f"pc=0x{device_data.pc:08x})"
             )
-        return "crashed (hang)"
+        return f"crashed ({reset_name})"
     if rr & _RR_WDT1:
         return "stopped"
     if rr & _RR_LOCKUP:
@@ -261,7 +265,7 @@ def generate_inspect(status_data, devices=[]):
     if not data:
         return Group(Text("\nNo matching device\n"))
 
-    panels = []
+    panels = [Text("")]
     for device_addr, d in sorted(data.items()):
         table = Table(show_header=False, box=None, pad_edge=False)
         table.add_column("field", style="bold cyan", no_wrap=True)
