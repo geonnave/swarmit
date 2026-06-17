@@ -23,7 +23,7 @@ from swarmit.testbed.controller import (
     ControllerSettings,
     NodeStatus,
     ResetLocation,
-    generate_inspect,
+    generate_info,
     generate_status,
 )
 from swarmit.testbed.helpers import (
@@ -611,17 +611,17 @@ def status(ctx, watch):
 
 @main.command()
 @click.pass_context
-def inspect(ctx):
-    """Dump full detail for the selected device(s).
+def info(ctx):
+    """Show full detail for the selected device(s).
 
     Everything from the status packet plus the raw crash report (decoded
     reset reason, fault status registers, and faulting PC/LR). Scope it
-    with the group's -d/--devices option, e.g.
-    `swarmit -d <addr> inspect`; with no -d it dumps every known device.
+    with the group's -d/--devices option, e.g. `swarm -d <addr> info`;
+    with no -d it shows every known device.
     """
     settings = ctx.obj["settings"]
     with build_client(settings, no_server=ctx.obj["no_server"]) as client:
-        print(generate_inspect(client.status(), settings.devices))
+        print(generate_info(client.status(), settings.devices))
 
 
 @main.command()

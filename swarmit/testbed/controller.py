@@ -250,7 +250,7 @@ def generate_status(status_data, devices=[], status_message="found"):
     return Group(header, table)
 
 
-def generate_inspect(status_data, devices=[]):
+def generate_info(status_data, devices=[]):
     """Full per-device detail: every status field plus the raw crash report.
 
     The status table shows a friendly one-line reset cause; this dumps
