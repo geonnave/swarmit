@@ -35,7 +35,9 @@ from swarmit.testbed.protocol import (
     PayloadStop,
     PayloadType,
     StatusType,
+    decode_cfsr,
     decode_reset_reason,
+    decode_sfsr,
 )
 
 CHUNK_SIZE = 128
@@ -65,6 +67,7 @@ class NodeStatus:
     pos_y: int = 0
     reset_reason: int = 0
     fault: int = 0
+    from_ns: int = 0
     cfsr: int = 0
     sfsr: int = 0
     pc: int = 0
@@ -137,25 +140,55 @@ def battery_level_color(level: int):
     return "red"
 
 
+# RESETREAS bit masks with a swarmit-specific meaning (see the bootloader's
+# two watchdogs: WDT0 is the crash deadman the running app must pet, WDT1 is
+# started by the stop command's DPPI path and nothing else).
+_RR_WDT0 = 1 << 1  # crash / hang: app stopped petting the deadman
+_RR_WDT1 = 1 << 25  # stop command (only thing that starts WDT1)
+_RR_LOCKUP = 1 << 4
+_RR_SREQ = 1 << 3  # soft reset: start_application or calibration-commit reboot
+_RR_PIN = 1 << 0
+
+
+def _fault_name(device_data) -> str:
+    try:
+        return FaultType(device_data.fault).name
+    except ValueError:
+        return f"fault{device_data.fault}"
+
+
 def format_reset_cause(device_data) -> str:
-    """Format the last reset cause of a node, including any latched fault."""
-    text = decode_reset_reason(device_data.reset_reason)
-    if device_data.fault:
-        try:
-            fault_name = FaultType(device_data.fault).name
-        except ValueError:
-            fault_name = f"fault {device_data.fault}"
-        text += f" ({fault_name} pc=0x{device_data.pc:08x})"
-    return text
+    """Friendly one-line label for a node's last reset cause.
+
+    Maps the raw RESETREAS + latched fault onto swarmit semantics. The raw
+    values stay available in the inspect view for low-level debugging.
+    """
+    rr = device_data.reset_reason
+    # Crash wins over everything: a stop racing a crash can set both bits.
+    if device_data.fault or (rr & _RR_WDT0):
+        if device_data.fault:
+            return (
+                f"crashed ({_fault_name(device_data)} "
+                f"pc=0x{device_data.pc:08x})"
+            )
+        return "crashed (hang)"
+    if rr & _RR_WDT1:
+        return "stopped"
+    if rr & _RR_LOCKUP:
+        return "lockup"
+    if rr == 0 or (rr & _RR_PIN):
+        return "power-on"
+    if rr & _RR_SREQ:
+        return "soft-reset"
+    return decode_reset_reason(rr)
 
 
 def reset_cause_color(device_data) -> str:
-    suspicious = (
-        device_data.fault
-        # watchdog0, lockup, watchdog1
-        or device_data.reset_reason & ((1 << 1) | (1 << 4) | (1 << 25))
-    )
-    return "red" if suspicious else "cyan"
+    if device_data.fault or (
+        device_data.reset_reason & (_RR_WDT0 | _RR_LOCKUP)
+    ):
+        return "red"
+    return "cyan"
 
 
 def generate_status(status_data, devices=[], status_message="found"):
@@ -210,6 +243,74 @@ def generate_status(status_data, devices=[], status_message="found"):
             f"[{reset_cause_color(device_data)}]{format_reset_cause(device_data)}",
         )
     return Group(header, table)
+
+
+def generate_inspect(status_data, devices=[]):
+    """Full per-device detail: every status field plus the raw crash report.
+
+    The status table shows a friendly one-line reset cause; this dumps
+    everything the bot reports - decoded and raw - for post-mortem of a
+    specific robot.
+    """
+    data = {
+        addr: device_data
+        for addr, device_data in status_data.items()
+        if (devices and addr in devices) or (not devices)
+    }
+    if not data:
+        return Group(Text("\nNo matching device\n"))
+
+    panels = []
+    for device_addr, d in sorted(data.items()):
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("field", style="bold cyan", no_wrap=True)
+        table.add_column("value")
+
+        table.add_row("Device", device_addr)
+        table.add_row("Type", d.device.name)
+        table.add_row("Status", d.status.name)
+        table.add_row(
+            "Battery",
+            f"[{battery_level_color(d.battery)}]{d.battery / 1000:.2f}V "
+            f"({int(d.battery / 3000 * 100)}%)",
+        )
+        table.add_row("Position", f"({d.pos_x}, {d.pos_y})")
+        if d.last_updated_at:
+            age = max(0.0, time.time() - d.last_updated_at)
+            table.add_row("Last update", f"{age:.1f}s ago")
+
+        table.add_row("", "")
+        table.add_row(
+            "Last reset",
+            f"[{reset_cause_color(d)}]{format_reset_cause(d)}",
+        )
+        table.add_row(
+            "  reset_reason",
+            f"0x{d.reset_reason:08x} ({decode_reset_reason(d.reset_reason)})",
+        )
+        table.add_row(
+            "  fault",
+            f"{_fault_name(d)}"
+            + (" (non-secure)" if d.fault and d.from_ns else "")
+            + (" (secure)" if d.fault and not d.from_ns else ""),
+        )
+        if d.fault:
+            cfsr_bits = decode_cfsr(d.cfsr)
+            sfsr_bits = decode_sfsr(d.sfsr)
+            table.add_row(
+                "  cfsr",
+                f"0x{d.cfsr:08x}" + (f" ({cfsr_bits})" if cfsr_bits else ""),
+            )
+            table.add_row(
+                "  sfsr",
+                f"0x{d.sfsr:08x}" + (f" ({sfsr_bits})" if sfsr_bits else ""),
+            )
+            elf = "app image" if d.from_ns else "bootloader image"
+            table.add_row("  pc", f"0x{d.pc:08x}  (resolve against {elf})")
+            table.add_row("  lr", f"0x{d.lr:08x}")
+        panels.append(table)
+        panels.append(Text(""))
+    return Group(*panels)
 
 
 def print_transfer_status(
@@ -421,6 +522,7 @@ class Controller:
                 pos_y=packet.payload.pos_y,
                 reset_reason=packet.payload.reset_reason,
                 fault=packet.payload.fault,
+                from_ns=packet.payload.from_ns,
                 cfsr=packet.payload.cfsr,
                 sfsr=packet.payload.sfsr,
                 pc=packet.payload.pc,

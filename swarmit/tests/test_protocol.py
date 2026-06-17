@@ -4,7 +4,9 @@ from swarmit.testbed.protocol import (
     CRASH_REPORT_SIZE,
     STATUS_LEGACY_SIZE,
     PayloadStatus,
+    decode_cfsr,
     decode_reset_reason,
+    decode_sfsr,
 )
 
 
@@ -17,6 +19,7 @@ def test_payload_status_round_trip():
         pos_y=200,
         reset_reason=0x2,  # watchdog0
         fault=2,  # secure fault
+        from_ns=1,
         cfsr=0x100,
         sfsr=0x8,
         pc=0x0001_2345,
@@ -33,6 +36,7 @@ def test_payload_status_round_trip():
     assert parsed.pos_y == 200
     assert parsed.reset_reason == 0x2
     assert parsed.fault == 2
+    assert parsed.from_ns == 1
     assert parsed.cfsr == 0x100
     assert parsed.sfsr == 0x8
     assert parsed.pc == 0x0001_2345
@@ -54,6 +58,7 @@ def test_payload_status_legacy_frame():
     assert parsed.pos_y == 43
     assert parsed.reset_reason == 0
     assert parsed.fault == 0
+    assert parsed.from_ns == 0
     assert parsed.pc == 0
 
 
@@ -77,3 +82,17 @@ def test_payload_status_truncated_frame_raises():
 )
 def test_decode_reset_reason(value, expected):
     assert decode_reset_reason(value) == expected
+
+
+def test_decode_cfsr():
+    assert decode_cfsr(0) == ""
+    assert decode_cfsr(1 << 1) == "DACCVIOL"
+    assert decode_cfsr(1 << 25) == "DIVBYZERO"
+    assert decode_cfsr(1 << 20) == "STKOF"
+
+
+def test_decode_sfsr():
+    assert decode_sfsr(0) == ""
+    # NS write into a secure region -> attribution unit violation
+    assert decode_sfsr(1 << 3) == "AUVIOL"
+    assert decode_sfsr(1 << 0) == "INVEP"
