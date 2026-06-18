@@ -20,15 +20,15 @@
 #define CRASH_LATCH_MAGIC (0xFA170BADUL)
 
 typedef enum {
-    CRASH_FAULT_NONE   = 0,
-    CRASH_FAULT_HARD   = 1,
-    CRASH_FAULT_SECURE = 2,
+    CRASH_FAULT_NONE   = 0,  ///< No fault caught - clean reset (power-on, pin, stop, soft-reset)
+    CRASH_FAULT_HARD   = 1,  ///< Secure HardFault, e.g. a bus/usage fault escalated in secure or NSC code
+    CRASH_FAULT_SECURE = 2,  ///< SecureFault, e.g. the app writing into secure memory (a NULL store hits AUVIOL)
 } crash_fault_t;
 
 typedef struct {
     uint32_t magic;    ///< Equals CRASH_LATCH_MAGIC when the latch holds a valid snapshot
     uint32_t fault;    ///< crash_fault_t value
-    uint32_t from_ns;  ///< 1 if the faulting context was non-secure (PC resolves against the app image)
+    uint32_t from_ns;  ///< 1 = non-secure user app faulted (resolve pc/lr against the app .elf); 0 = secure bootloader
     uint32_t cfsr;     ///< Configurable Fault Status Register (MMFSR, BFSR, UFSR)
     uint32_t sfsr;     ///< Secure Fault Status Register
     uint32_t pc;       ///< Stacked program counter at fault (0 if unavailable)
