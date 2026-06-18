@@ -28,6 +28,8 @@
 #include "localization.h"
 #include "timer.h"
 
+#include "../System/crash_latch.h"
+
 #define SWARMIT_BASE_ADDRESS            (0x10000)
 #define SWARMIT_CONFIG_START_ADDRESS    (0x0103f800) // start of the last page (2KB) of the flash (0x01000000 + 0x00040000 - 0x800)
 
@@ -318,6 +320,20 @@ int main(void) {
     // Check reset reason and switch to user image if reset was not triggered by any wdt timeout
     uint32_t resetreas = NRF_RESET_S->RESETREAS;
     NRF_RESET_S->RESETREAS = NRF_RESET_S->RESETREAS;
+
+    // Publish the cause of the reset that brought us here; the network core
+    // appends it to every status frame. The fault snapshot is only valid when
+    // the previous run latched one before the watchdog fired.
+    ipc_shared_data.crash_report.reset_reason = resetreas;
+    if (crash_latch.magic == CRASH_LATCH_MAGIC) {
+        ipc_shared_data.crash_report.fault   = (uint8_t)crash_latch.fault;
+        ipc_shared_data.crash_report.from_ns = (uint8_t)crash_latch.from_ns;
+        ipc_shared_data.crash_report.cfsr    = crash_latch.cfsr;
+        ipc_shared_data.crash_report.sfsr    = crash_latch.sfsr;
+        ipc_shared_data.crash_report.pc      = crash_latch.pc;
+        ipc_shared_data.crash_report.lr      = crash_latch.lr;
+    }
+    crash_latch.magic = 0;
 
     // Consume the boot intent set by whoever requested this reset (or random
     // RAM on first power-on, which won't match either magic value).

@@ -308,23 +308,49 @@ void Reset_Handler(void) {
 }
 
 // Exception handlers
+//
+// The trampolines resolve the faulting context's stack frame and pass it in R0
+// plus EXC_RETURN in R1. EXC_RETURN bit 6 (S) tells whether the background was
+// secure: when a non-secure access faults into the secure handler the frame
+// lives on the non-secure stack, so we must read MSP_NS/PSP_NS instead of the
+// banked secure SP - otherwise the captured PC reads off the wrong stack as 0.
 void HardFault_Handler(void) {
     __ASM(
-         "tst    LR, #4             ;"  // Check EXC_RETURN in Link register bit 2.
+         "tst    LR, #0x40          ;"  // EXC_RETURN bit 6 (S): secure background?
+         "bne    1f                 ;"
+         "tst    LR, #4             ;"  // non-secure background: pick NS stack
          "ite    EQ                 ;"
-         "mrseq  R0, MSP            ;"  // Stacking was using MSP.
-         "mrsne  R0, PSP            ;"  // Stacking was using PSP.
-         "b      HardFaultHandler   ;"  // Stack pointer passed through R0.
+         "mrseq  R0, MSP_NS         ;"
+         "mrsne  R0, PSP_NS         ;"
+         "b      2f                 ;"
+         "1:                        ;"
+         "tst    LR, #4             ;"  // secure background: pick secure stack
+         "ite    EQ                 ;"
+         "mrseq  R0, MSP            ;"
+         "mrsne  R0, PSP            ;"
+         "2:                        ;"
+         "mov    R1, LR             ;"  // EXC_RETURN passed through R1.
+         "b      HardFaultHandler   ;"  // Stack frame passed through R0.
     );
 }
 
 void SecureFault_Handler(void) {
     __ASM(
-         "tst    LR, #4             ;"  // Check EXC_RETURN in Link register bit 2.
+         "tst    LR, #0x40          ;"  // EXC_RETURN bit 6 (S): secure background?
+         "bne    1f                 ;"
+         "tst    LR, #4             ;"  // non-secure background: pick NS stack
          "ite    EQ                 ;"
-         "mrseq  R0, MSP            ;"  // Stacking was using MSP.
-         "mrsne  R0, PSP            ;"  // Stacking was using PSP.
-         "b      SecureFaultHandler ;"  // Stack pointer passed through R0.
+         "mrseq  R0, MSP_NS         ;"
+         "mrsne  R0, PSP_NS         ;"
+         "b      2f                 ;"
+         "1:                        ;"
+         "tst    LR, #4             ;"  // secure background: pick secure stack
+         "ite    EQ                 ;"
+         "mrseq  R0, MSP            ;"
+         "mrsne  R0, PSP            ;"
+         "2:                        ;"
+         "mov    R1, LR             ;"  // EXC_RETURN passed through R1.
+         "b      SecureFaultHandler ;"  // Stack frame passed through R0.
     );
 }
 

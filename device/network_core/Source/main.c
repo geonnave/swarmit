@@ -266,6 +266,8 @@ int main(void) {
             length += sizeof(uint16_t);
             memcpy(&_app_vars.notification_buffer[length], (void *)&ipc_shared_data.current_position, sizeof(position_2d_t));
             length += sizeof(position_2d_t);
+            memcpy(&_app_vars.notification_buffer[length], (void *)&ipc_shared_data.crash_report, sizeof(ipc_crash_report_t));
+            length += sizeof(ipc_crash_report_t);
             mari_node_tx_payload(_app_vars.notification_buffer, length, &SWARMIT_TX_DEFAULT);
         }
 

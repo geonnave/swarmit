@@ -80,6 +80,17 @@ typedef struct __attribute__((packed)) {
     uint32_t y;  ///< Y coordinate in mm
 } position_2d_t;
 
+/// Crash report describing the most recent reset, appended to status frames
+typedef struct __attribute__((packed)) {
+    uint32_t reset_reason;  ///< RESETREAS value captured at boot (0 means power-on)
+    uint8_t  fault;         ///< Fault latched before the reset (0: none, 1: hard fault, 2: secure fault)
+    uint8_t  from_ns;       ///< 1 = non-secure user app faulted (resolve pc/lr against the app .elf); 0 = secure bootloader
+    uint32_t cfsr;          ///< Configurable Fault Status Register at fault
+    uint32_t sfsr;          ///< Secure Fault Status Register at fault
+    uint32_t pc;            ///< Stacked program counter at fault
+    uint32_t lr;            ///< Stacked link register at fault
+} ipc_crash_report_t;
+
 typedef struct __attribute__((packed)) {
     bool                    net_ready;          ///< Network core is ready
     bool                    net_ack;            ///< Network core acked the latest request
@@ -95,6 +106,7 @@ typedef struct __attribute__((packed)) {
     ipc_radio_pdu_t         tx_pdu;             ///< TX pdu
     ipc_radio_pdu_t         rx_pdu;             ///< RX pdu
     ipc_lh2_calibration_t    lh2_calibration;     ///< LH2 calibration data
+    ipc_crash_report_t      crash_report;       ///< Cause of the most recent reset
 } ipc_shared_data_t;
 
 /**
