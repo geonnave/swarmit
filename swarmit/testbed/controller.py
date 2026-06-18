@@ -12,6 +12,7 @@ from dotbot_utils.serial_interface import get_default_port
 from rich import print
 from rich.console import Group
 from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from tqdm import tqdm
@@ -271,7 +272,6 @@ def generate_info(status_data, devices=[]):
         table.add_column("field", style="bold cyan", no_wrap=True)
         table.add_column("value")
 
-        table.add_row("Device", device_addr)
         table.add_row("Type", d.device.name)
         table.add_row("Status", d.status.name)
         table.add_row(
@@ -320,7 +320,16 @@ def generate_info(status_data, devices=[]):
             )
             table.add_row("", "")
             table.add_row("Raw status pkt", spaced)
-        panels.append(table)
+        panels.append(
+            Panel(
+                table,
+                title=f"[bold magenta]{device_addr}[/]",
+                title_align="left",
+                border_style="cyan",
+                padding=(0, 1),
+                expand=False,
+            )
+        )
         panels.append(Text(""))
     return Group(*panels)
 
