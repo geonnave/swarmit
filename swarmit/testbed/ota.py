@@ -40,9 +40,9 @@ from swarmit.testbed.protocol import (
 
 BROADCAST_ADDRESS = 0xFFFFFFFFFFFFFFFF
 
-# W = 22 matches the 22 downlink slots per Mari "huge" slotframe; the report
-# bitmap is a uint32 so W may grow to 32 without a wire change.
-BLOCK_SIZE_DEFAULT = 22
+# W = 32 is the largest block the uint32 report bitmap holds without a wire
+# change; a larger block means fewer report rounds (less per-block overhead).
+BLOCK_SIZE_DEFAULT = 32
 # Base settle time before collecting a block report (~one Mari slotframe): the
 # fixed part of the wait, on top of the time it takes the block to be delivered.
 REPORT_TIMEOUT_DEFAULT = 0.3
@@ -55,9 +55,13 @@ REPORT_TIMEOUT_DEFAULT = 0.3
 PER_CHUNK_DELIVERY_DEFAULT = 0.25
 # Upper bound on a single report wait.
 WAIT_CAP_DEFAULT = 12.0
-# Controller-side floor between chunk sends; small, since the gateway's ~32-deep
-# queue buffers a W=22 block. The real pacing is the report wait above.
-INTER_CHUNK_DELAY_DEFAULT = 0.012
+# Delay between chunk sends. This paces how fast we feed the gateway's ~32-deep
+# TX queue, which is SHARED with status frames and other bots' traffic - so we
+# must not blast a whole block into it. Since the report wait is delivery-aware
+# (below), this delay only moves time from "waiting" into "sending"; it does not
+# slow the transfer (which is drain-bound), it just keeps our queue footprint
+# shallow so other sources keep their slots. Tune from the file log if needed.
+INTER_CHUNK_DELAY_DEFAULT = 0.15
 # A bot that misses this many consecutive report rounds becomes a straggler.
 # Sized against ~90% uplink PDR: P(4 lost reports) = 0.01% per bot-block.
 SILENT_STRAGGLER_ROUNDS_DEFAULT = 4
@@ -244,18 +248,27 @@ class BlockTransfer:
         return [start + bit for bit in range(self._w) if mask & (1 << bit)]
 
     def report_wait(self, chunks_sent: int) -> float:
-        """How long to wait before collecting reports for a round.
+        """How long to wait after a round's sends before collecting reports.
 
-        Scales with the number of chunks just sent, so a full block gets time to
-        actually drain the downlink before we ask what landed, while a small
-        repair round waits only briefly. This is what keeps the bot from
-        reporting a block ~empty one slotframe after a 22-chunk burst and
-        triggering a wasteful full re-send.
+        The block needs ``chunks_sent * per_chunk_delivery`` to drain the
+        downlink. The send loop already spent ``chunks_sent * inter_chunk_delay``
+        pacing those sends, during which chunks were draining, so we only wait
+        for the *residual* backlog plus the report-collection window. With
+        ``inter_chunk_delay >= per_chunk_delivery`` (fully paced) the residual is
+        zero and we wait just one report window; with no pacing it reduces to the
+        full drain time. Either way the total per-block time is the same
+        (drain-bound) - pacing only trades wait for send and keeps the gateway
+        queue shallow. A round that sent nothing (a silent-bot re-request) waits
+        just the report window.
         """
+        if chunks_sent <= 0:
+            return self.settings.report_timeout
+        residual = chunks_sent * max(
+            0.0,
+            self.settings.per_chunk_delivery - self.settings.inter_chunk_delay,
+        )
         return min(
-            self.settings.report_timeout
-            + chunks_sent * self.settings.per_chunk_delivery,
-            self.settings.wait_cap,
+            self.settings.report_timeout + residual, self.settings.wait_cap
         )
 
     # ------------------------------------------------------------------ #

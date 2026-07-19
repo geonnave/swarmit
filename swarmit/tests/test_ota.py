@@ -164,17 +164,30 @@ def test_block_layout_and_masks():
     assert bt.indices_from_mask(1, 0b1010) == [5, 7]
 
 
-def test_report_wait_scales_with_chunks_and_caps():
-    settings = BlockOTASettings(
+def test_report_wait_waits_for_residual_backlog():
+    # No pacing: wait covers the full drain of what was sent.
+    unpaced = BlockOTASettings(
         block_size=4,
         report_timeout=0.3,
         per_chunk_delivery=0.25,
+        inter_chunk_delay=0.0,
         wait_cap=12.0,
     )
-    bt, *_ = build(["AABB"], make_image(CHUNK_SIZE), settings=settings)
-    assert bt.report_wait(0) == pytest.approx(0.3)  # base only
-    assert bt.report_wait(4) == pytest.approx(0.3 + 4 * 0.25)  # scales
+    bt, *_ = build(["AABB"], make_image(CHUNK_SIZE), settings=unpaced)
+    assert bt.report_wait(0) == pytest.approx(0.3)  # nothing sent
+    assert bt.report_wait(4) == pytest.approx(0.3 + 4 * 0.25)  # full drain
     assert bt.report_wait(1000) == pytest.approx(12.0)  # capped
+
+    # Fully paced (delay >= drain): the send already drained it, so we wait
+    # only the report window regardless of how many chunks were sent.
+    paced = BlockOTASettings(
+        block_size=4,
+        report_timeout=0.3,
+        per_chunk_delivery=0.25,
+        inter_chunk_delay=0.25,
+    )
+    bt2, *_ = build(["AABB"], make_image(CHUNK_SIZE), settings=paced)
+    assert bt2.report_wait(32) == pytest.approx(0.3)
 
 
 def test_repair_mask_unions_reporting_devices():
