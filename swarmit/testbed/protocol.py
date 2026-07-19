@@ -47,6 +47,12 @@ class PayloadType(IntEnum):
     SWARMIT_OTA_CHUNK_ACK = 0x87
     SWARMIT_EVENT_GPIO = 0x88
     SWARMIT_EVENT_LOG = 0x89
+    # Block-OTA (fast OTA) additions. Host -> device: report request and
+    # finalize; device -> host: report response and finalize response.
+    SWARMIT_OTA_BLOCK_REPORT_REQ = 0x8A
+    SWARMIT_OTA_BLOCK_REPORT_RESP = 0x8B
+    SWARMIT_OTA_FINALIZE = 0x8C
+    SWARMIT_OTA_FINALIZE_RESP = 0x8D
 
     # Custom messages
     SWARMIT_MESSAGE = 0xA0
@@ -58,6 +64,14 @@ class PayloadType(IntEnum):
 
     # Marilib metrics probe
     METRICS_PROBE = MariDefaultPayloadType.METRICS_PROBE
+
+
+# OTA protocol version reported by a bootloader in its OTA_START_ACK. Version 1
+# is the legacy per-chunk stop-and-wait path (no version byte on the wire, so it
+# parses as 1); version 2 is the block/bitmap-NACK path. The controller uses the
+# block path only with the subset of bots that report version >= 2.
+OTA_PROTOCOL_VERSION_LEGACY = 1
+OTA_PROTOCOL_VERSION_BLOCK = 2
 
 
 # First byte of a raw LH2 capture sample carried inside a SWARMIT_EVENT_LOG
@@ -255,7 +269,11 @@ class PayloadReset(Payload):
 
 @dataclass
 class PayloadOTAStart(Payload):
-    """Dataclass that holds an OTA start packet."""
+    """Dataclass that holds an OTA start packet.
+
+    `version` is appended at the end so a legacy bootloader that parses only
+    the first 8 bytes (image size + chunk count) tolerates the extra byte.
+    """
 
     metadata: list[PayloadFieldMetadata] = dataclasses.field(
         default_factory=lambda: [
@@ -263,11 +281,13 @@ class PayloadOTAStart(Payload):
             PayloadFieldMetadata(
                 name="fw_chunk_counts", disp="chunks", length=4
             ),
+            PayloadFieldMetadata(name="version", disp="ver.", length=1),
         ]
     )
 
     fw_length: int = 0
     fw_chunk_count: int = 0
+    version: int = OTA_PROTOCOL_VERSION_BLOCK
 
 
 @dataclass
@@ -318,11 +338,27 @@ class PayloadCalibrationData(Payload):
 
 @dataclass
 class PayloadOTAStartAck(Payload):
-    """Dataclass that holds an application OTA start ACK notification packet."""
+    """Dataclass that holds an application OTA start ACK notification packet.
+
+    A block-OTA bootloader appends its `version` byte; a legacy bootloader
+    sends the empty ack, which parses as version 1.
+    """
 
     metadata: list[PayloadFieldMetadata] = dataclasses.field(
-        default_factory=lambda: []
+        default_factory=lambda: [
+            PayloadFieldMetadata(name="version", disp="ver.", length=1),
+        ]
     )
+
+    version: int = OTA_PROTOCOL_VERSION_LEGACY
+
+    def from_bytes(self, bytes_):
+        # Legacy bootloaders send an empty ack (no version byte); treat that
+        # as version 1 so mixed fleets negotiate correctly.
+        if len(bytes_) == 0:
+            self.version = OTA_PROTOCOL_VERSION_LEGACY
+            return self
+        return super().from_bytes(bytes_)
 
 
 @dataclass
@@ -336,6 +372,69 @@ class PayloadOTAChunkAck(Payload):
     )
 
     index: int = 0
+
+
+@dataclass
+class PayloadOTABlockReportReq(Payload):
+    """Host -> device: request a bot's received-chunk bitmap for one block."""
+
+    metadata: list[PayloadFieldMetadata] = dataclasses.field(
+        default_factory=lambda: [
+            PayloadFieldMetadata(name="block_index", disp="blk", length=4),
+            PayloadFieldMetadata(name="block_size", disp="w"),
+        ]
+    )
+
+    block_index: int = 0
+    block_size: int = 0
+
+
+@dataclass
+class PayloadOTABlockReportResp(Payload):
+    """Device -> host: bitmap of received+verified chunks for its block.
+
+    `block_index` is the block the bot currently holds; a bot that has not yet
+    written any chunk of the requested block reports an earlier block, which the
+    controller reads as "needs the whole requested block".
+    """
+
+    metadata: list[PayloadFieldMetadata] = dataclasses.field(
+        default_factory=lambda: [
+            PayloadFieldMetadata(name="block_index", disp="blk", length=4),
+            PayloadFieldMetadata(name="received_mask", disp="mask", length=4),
+            PayloadFieldMetadata(name="status", disp="st."),
+        ]
+    )
+
+    block_index: int = 0
+    received_mask: int = 0
+    status: int = 0
+
+
+@dataclass
+class PayloadOTAFinalize(Payload):
+    """Host -> device: verify the whole written image against this SHA256."""
+
+    metadata: list[PayloadFieldMetadata] = dataclasses.field(
+        default_factory=lambda: [
+            PayloadFieldMetadata(name="sha", type_=bytes, length=32),
+        ]
+    )
+
+    sha: bytes = dataclasses.field(default_factory=lambda: bytearray)
+
+
+@dataclass
+class PayloadOTAFinalizeResp(Payload):
+    """Device -> host: 1 if the image SHA256 matched, 0 otherwise."""
+
+    metadata: list[PayloadFieldMetadata] = dataclasses.field(
+        default_factory=lambda: [
+            PayloadFieldMetadata(name="ok", disp="ok"),
+        ]
+    )
+
+    ok: int = 0
 
 
 @dataclass
@@ -383,6 +482,16 @@ register_parser(PayloadType.SWARMIT_OTA_START, PayloadOTAStart)
 register_parser(PayloadType.SWARMIT_OTA_CHUNK, PayloadOTAChunk)
 register_parser(PayloadType.SWARMIT_OTA_START_ACK, PayloadOTAStartAck)
 register_parser(PayloadType.SWARMIT_OTA_CHUNK_ACK, PayloadOTAChunkAck)
+register_parser(
+    PayloadType.SWARMIT_OTA_BLOCK_REPORT_REQ, PayloadOTABlockReportReq
+)
+register_parser(
+    PayloadType.SWARMIT_OTA_BLOCK_REPORT_RESP, PayloadOTABlockReportResp
+)
+register_parser(PayloadType.SWARMIT_OTA_FINALIZE, PayloadOTAFinalize)
+register_parser(
+    PayloadType.SWARMIT_OTA_FINALIZE_RESP, PayloadOTAFinalizeResp
+)
 register_parser(PayloadType.SWARMIT_EVENT_LOG, PayloadEvent)
 register_parser(PayloadType.SWARMIT_MESSAGE, PayloadMessage)
 register_parser(PayloadType.SWARMIT_LH2_CALIBRATION, PayloadCalibrationData)
