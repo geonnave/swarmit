@@ -1053,6 +1053,12 @@ class Controller:
             td = self.transfer_data.get(addr)
             if td is not None:
                 td.success = result.success
+        delivered = sum(r.confirmed_chunks for r in results.values())
+        waste = transfer.chunk_sends / delivered if delivered else 0
+        print(
+            f"[dim]block OTA: {transfer.chunk_sends} chunk sends for "
+            f"{delivered} delivered (waste x{waste:.2f})[/]"
+        )
         if self.settings.verbose:
             for addr, result in results.items():
                 print(

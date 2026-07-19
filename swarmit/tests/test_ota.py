@@ -164,14 +164,17 @@ def test_block_layout_and_masks():
     assert bt.indices_from_mask(1, 0b1010) == [5, 7]
 
 
-def test_round_wait_backoff_capped():
+def test_report_wait_scales_with_chunks_and_caps():
     settings = BlockOTASettings(
-        block_size=4, report_timeout=0.26, backoff_cap=2.0
+        block_size=4,
+        report_timeout=0.3,
+        per_chunk_delivery=0.25,
+        wait_cap=12.0,
     )
     bt, *_ = build(["AABB"], make_image(CHUNK_SIZE), settings=settings)
-    assert bt.round_wait(0) == pytest.approx(0.26)
-    assert bt.round_wait(1) == pytest.approx(0.52)
-    assert bt.round_wait(10) == pytest.approx(2.0)  # capped
+    assert bt.report_wait(0) == pytest.approx(0.3)  # base only
+    assert bt.report_wait(4) == pytest.approx(0.3 + 4 * 0.25)  # scales
+    assert bt.report_wait(1000) == pytest.approx(12.0)  # capped
 
 
 def test_repair_mask_unions_reporting_devices():

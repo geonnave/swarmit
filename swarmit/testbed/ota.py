@@ -43,12 +43,20 @@ BROADCAST_ADDRESS = 0xFFFFFFFFFFFFFFFF
 # W = 22 matches the 22 downlink slots per Mari "huge" slotframe; the report
 # bitmap is a uint32 so W may grow to 32 without a wire change.
 BLOCK_SIZE_DEFAULT = 22
-# One Mari "huge" slotframe (~257 ms); every dedicated uplink slot happens
-# within one slotframe, so any bot that is going to report has reported by then.
-REPORT_TIMEOUT_DEFAULT = 0.26
-BACKOFF_CAP_DEFAULT = 2.0
-# ~ one D-slot cadence on "huge"; a controller-side floor so a denser schedule
-# cannot outrun the bootloader's flash writes.
+# Base settle time before collecting a block report (~one Mari slotframe): the
+# fixed part of the wait, on top of the time it takes the block to be delivered.
+REPORT_TIMEOUT_DEFAULT = 0.3
+# Observed per-chunk downlink delivery time. On the desk the gateway delivers
+# ~1 frame per Mari slotframe (~0.26 s/chunk), far below the 22-slots/slotframe
+# theoretical max. The report wait scales by chunks-sent x this, so we wait for a
+# block to actually drain before asking "what did you get?" instead of asking
+# after one slotframe (which made the bot report ~everything missing and
+# triggered a full, wasteful re-send into an already-full gateway queue).
+PER_CHUNK_DELIVERY_DEFAULT = 0.25
+# Upper bound on a single report wait.
+WAIT_CAP_DEFAULT = 12.0
+# Controller-side floor between chunk sends; small, since the gateway's ~32-deep
+# queue buffers a W=22 block. The real pacing is the report wait above.
 INTER_CHUNK_DELAY_DEFAULT = 0.012
 # A bot that misses this many consecutive report rounds becomes a straggler.
 # Sized against ~90% uplink PDR: P(4 lost reports) = 0.01% per bot-block.
@@ -78,7 +86,8 @@ class BlockOTASettings:
 
     block_size: int = BLOCK_SIZE_DEFAULT
     report_timeout: float = REPORT_TIMEOUT_DEFAULT
-    backoff_cap: float = BACKOFF_CAP_DEFAULT
+    per_chunk_delivery: float = PER_CHUNK_DELIVERY_DEFAULT
+    wait_cap: float = WAIT_CAP_DEFAULT
     inter_chunk_delay: float = INTER_CHUNK_DELAY_DEFAULT
     silent_straggler_rounds: int = SILENT_STRAGGLER_ROUNDS_DEFAULT
     stall_straggler_rounds: int = STALL_STRAGGLER_ROUNDS_DEFAULT
@@ -168,6 +177,9 @@ class BlockTransfer:
 
         # Persistent per-(device, block) confirmed bitmap.
         self._confirmed: dict[tuple[str, int], int] = {}
+        # Total chunk frames put on the wire (incl. retransmits). Compared with
+        # the delivered count it exposes wasted downlink (churn).
+        self._chunk_sends = 0
         # Straggler set (reversible: a bot rejoins when it reports again).
         self._straggler: set[str] = set()
         # Blocks each device never fully confirmed (for the unicast pass).
@@ -231,11 +243,19 @@ class BlockTransfer:
         start = block * self._w
         return [start + bit for bit in range(self._w) if mask & (1 << bit)]
 
-    def round_wait(self, round_no: int) -> float:
-        """Exponential backoff on the report-collection window."""
+    def report_wait(self, chunks_sent: int) -> float:
+        """How long to wait before collecting reports for a round.
+
+        Scales with the number of chunks just sent, so a full block gets time to
+        actually drain the downlink before we ask what landed, while a small
+        repair round waits only briefly. This is what keeps the bot from
+        reporting a block ~empty one slotframe after a 22-chunk burst and
+        triggering a wasteful full re-send.
+        """
         return min(
-            self.settings.report_timeout * (2**round_no),
-            self.settings.backoff_cap,
+            self.settings.report_timeout
+            + chunks_sent * self.settings.per_chunk_delivery,
+            self.settings.wait_cap,
         )
 
     # ------------------------------------------------------------------ #
@@ -260,7 +280,23 @@ class BlockTransfer:
             self._transfer_block(block)
         self._recover_stragglers()
         self._finalize()
-        return self._result()
+        results = self._result()
+        # Waste ratio: chunk frames sent vs delivered. ~1.0 is ideal; a high
+        # ratio means the pacing is re-sending chunks the gateway had not yet
+        # drained (tune per_chunk_delivery up toward the real downlink period).
+        delivered = sum(r.confirmed_chunks for r in results.values())
+        if self._logger is not None and delivered:
+            self._logger.info(
+                "block ota done",
+                chunk_sends=self._chunk_sends,
+                delivered=delivered,
+                waste_ratio=round(self._chunk_sends / delivered, 2),
+            )
+        return results
+
+    @property
+    def chunk_sends(self) -> int:
+        return self._chunk_sends
 
     def _dest(self, addr: str | None) -> int:
         if addr is None:
@@ -280,6 +316,7 @@ class BlockTransfer:
                     chunk=chunk.data,
                 ),
             )
+            self._chunk_sends += 1
             if self.settings.inter_chunk_delay:
                 self._sleep(self.settings.inter_chunk_delay)
 
@@ -319,11 +356,13 @@ class BlockTransfer:
             with self._lock:
                 self._round_reports = {}
             targets = [None] if self.broadcast else list(self.devices)
+            sent_this_round = 0
             for target in targets:
                 if needed:
                     self._send_chunks(needed, target)
+                    sent_this_round += len(needed)
                 self._send_report_req(block, target)
-            self._sleep(self.round_wait(self._round))
+            self._sleep(self.report_wait(sent_this_round))
             self._evaluate_round(block)
             if self.block_settled(block):
                 break
