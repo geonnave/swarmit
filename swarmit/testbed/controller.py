@@ -23,7 +23,10 @@ from swarmit.testbed.adapter import (
     MarilibEdgeAdapter,
 )
 from swarmit.testbed.logger import LOGGER
+from swarmit.testbed.ota import BlockOTASettings, BlockTransfer
 from swarmit.testbed.protocol import (
+    OTA_PROTOCOL_VERSION_BLOCK,
+    OTA_PROTOCOL_VERSION_LEGACY,
     DeviceType,
     FaultType,
     PayloadCalibrationData,
@@ -400,6 +403,12 @@ class Controller:
         self.chunks: list[DataChunk] = []
         self.start_ota_data: StartOtaData = StartOtaData()
         self.transfer_data: dict[str, TransferDataStatus] = {}
+        # OTA protocol version reported per bot in its OTA_START_ACK (1 = legacy
+        # per-chunk, 2 = block/bitmap). Drives the transfer-path choice.
+        self._ota_versions: dict[str, int] = {}
+        # Active block transfer, so RX-thread report/finalize frames can be fed
+        # into it. None outside a block-OTA transfer.
+        self._block_transfer: BlockTransfer | None = None
         self._known_devices: dict[str, StatusType] = {}
         self._log_event_listeners: list = []
         self._log_listeners_lock = threading.Lock()
@@ -552,11 +561,26 @@ class Controller:
                 last_updated_at=now,
             )
             self.status_data.update({device_addr: status})
-        elif (
-            packet.payload_type == PayloadType.SWARMIT_OTA_START_ACK
-            and device_addr not in self.start_ota_data.addrs
-        ):
-            self.start_ota_data.addrs.append(device_addr)
+        elif packet.payload_type == PayloadType.SWARMIT_OTA_START_ACK:
+            # A bootloader speaking the block protocol appends its version; a
+            # legacy one sends the empty ack, which parses as version 1.
+            self._ota_versions[device_addr] = getattr(
+                packet.payload, "version", OTA_PROTOCOL_VERSION_LEGACY
+            )
+            if device_addr not in self.start_ota_data.addrs:
+                self.start_ota_data.addrs.append(device_addr)
+        elif packet.payload_type == PayloadType.SWARMIT_OTA_BLOCK_REPORT_RESP:
+            if self._block_transfer is not None:
+                self._block_transfer.on_report(
+                    device_addr,
+                    packet.payload.block_index,
+                    packet.payload.received_mask,
+                )
+        elif packet.payload_type == PayloadType.SWARMIT_OTA_FINALIZE_RESP:
+            if self._block_transfer is not None:
+                self._block_transfer.on_finalize_resp(
+                    device_addr, bool(packet.payload.ok)
+                )
         elif packet.payload_type == PayloadType.SWARMIT_OTA_CHUNK_ACK:
             try:
                 acked = bool(
@@ -834,7 +858,15 @@ class Controller:
         """Start the OTA process."""
         if devices is None:
             devices = self.settings.devices or []
+        # Pad the image to a 4-byte boundary: the device writes flash a 32-bit
+        # word at a time, so a final chunk whose length is not a multiple of 4
+        # would drop its tail bytes and fail the whole-image FINALIZE check.
+        # 0xFF is the erased-flash value, so the padding is a no-op on device.
+        firmware = bytes(firmware)
+        if len(firmware) % 4:
+            firmware = firmware + b"\xff" * (4 - len(firmware) % 4)
         self.start_ota_data = StartOtaData()
+        self._ota_versions = {}
         self.chunks = []
         digest = hashes.Hash(hashes.SHA256())
         chunks_count = int(len(firmware) / CHUNK_SIZE) + int(
@@ -953,6 +985,83 @@ class Controller:
             time.sleep(0.001)
             send = time.time() - send_time > self.settings.ota_timeout
 
+    def _transfer_block_protocol(
+        self,
+        firmware,
+        devices,
+        show_progress: bool = True,
+    ) -> dict[str, TransferDataStatus]:
+        """Transfer the image with the block / bitmap-NACK protocol.
+
+        Populates ``self.transfer_data`` (acked bits, success) exactly like the
+        legacy path so callers - the daemon stream, LocalSwarmitClient.flash -
+        keep working unchanged.
+        """
+        data_size = len(firmware)
+        use_progress_bar = show_progress and not self.settings.verbose
+        progress = None
+        if use_progress_bar:
+            progress = tqdm(
+                range(0, data_size),
+                unit="B",
+                unit_scale=False,
+                colour="green",
+                ncols=100,
+            )
+            progress.set_description(
+                f"Loading firmware ({int(data_size / 1024)}kB, block OTA)"
+            )
+
+        self.transfer_data = {}
+        for _addr in devices:
+            self.transfer_data[_addr] = TransferDataStatus()
+            self.transfer_data[_addr].chunks = [
+                Chunk(index=f"{i:03d}", size=f"{self.chunks[i].size:03d}B")
+                for i in range(len(self.chunks))
+            ]
+
+        def on_progress(addr: str, chunk_index: int) -> None:
+            td = self.transfer_data.get(addr)
+            if td is None or chunk_index >= len(td.chunks):
+                return
+            chunk = td.chunks[chunk_index]
+            if not chunk.acked:
+                chunk.acked = 1
+                if progress is not None:
+                    progress.update(self.chunks[chunk_index].size)
+
+        broadcast = not self.settings.devices
+        transfer = BlockTransfer(
+            chunks=self.chunks,
+            devices=list(devices),
+            send_payload=self.send_payload,
+            image_sha=self.start_ota_data.fw_hash,
+            settings=BlockOTASettings(),
+            broadcast=broadcast,
+            on_progress=on_progress,
+            logger=self.logger,
+        )
+        self._block_transfer = transfer
+        try:
+            results = transfer.run()
+        finally:
+            self._block_transfer = None
+        if progress is not None:
+            progress.close()
+
+        for addr, result in results.items():
+            td = self.transfer_data.get(addr)
+            if td is not None:
+                td.success = result.success
+        if self.settings.verbose:
+            for addr, result in results.items():
+                print(
+                    f"{addr}: {result.confirmed_chunks}/{result.total_chunks} "
+                    f"chunks, finalized={result.finalized}, "
+                    f"straggler={result.straggler}"
+                )
+        return self.transfer_data
+
     def transfer(
         self,
         firmware,
@@ -965,6 +1074,19 @@ class Controller:
         render their own progress (e.g. the daemon's /flash/stream or
         LocalSwarmitClient.flash) pass False to avoid duplicate output.
         """
+        # Use the block/bitmap path when every target bot negotiated it in its
+        # OTA_START_ACK; otherwise fall back to the legacy per-chunk path for
+        # the whole group. (Per-subset dual-path is a follow-up - see
+        # plans/swarmit-fast-ota/plan.html, Phase 2.)
+        if devices and all(
+            self._ota_versions.get(addr, OTA_PROTOCOL_VERSION_LEGACY)
+            >= OTA_PROTOCOL_VERSION_BLOCK
+            for addr in devices
+        ):
+            return self._transfer_block_protocol(
+                firmware, devices, show_progress
+            )
+
         data_size = len(firmware)
         use_progress_bar = show_progress and not self.settings.verbose
         if use_progress_bar:
