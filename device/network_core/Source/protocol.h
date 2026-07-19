@@ -12,11 +12,11 @@
 #define SWRMT_OTA_CHUNK_SIZE        (128U)
 #define SWRMT_OTA_SHA256_LENGTH     (32U)
 
-/// Block-OTA (fast OTA) parameters. W = 22 matches the 22 downlink slots per
-/// Mari "huge" slotframe; the received bitmap is a uint32_t so W may grow to 32
-/// without a wire change. The protocol version is echoed in OTA_START_ACK so the
-/// controller knows the bootloader speaks the block/bitmap path.
-#define SWRMT_OTA_BLOCK_SIZE        (22U)
+/// Block-OTA (fast OTA) parameters. W = 32 is the largest block the uint32_t
+/// received bitmap holds; bigger blocks mean fewer report rounds. Must match the
+/// controller's BLOCK_SIZE. The protocol version is echoed in OTA_START_ACK so
+/// the controller knows the bootloader speaks the block/bitmap path.
+#define SWRMT_OTA_BLOCK_SIZE        (32U)
 #define SWRMT_OTA_PROTOCOL_VERSION  (2U)
 
 typedef enum {
