@@ -13,6 +13,7 @@ import pytest
 from swarmit.testbed.ota import (
     BROADCAST_ADDRESS,
     MARI_SCHEDULES,
+    OTA_DOWNLINK_UTILIZATION,
     BlockOTASettings,
     BlockTransfer,
     settings_for_fleet,
@@ -160,7 +161,9 @@ def test_settings_for_fleet_derives_from_schedule():
     # ~24 ms/chunk on medium at util 0.5, block 32.
     s = settings_for_fleet("medium", 1)
     medium_dl = MARI_SCHEDULES["medium"].downlink_pps
-    assert s.inter_chunk_delay == pytest.approx(1.0 / (medium_dl * 0.5), rel=0.02)
+    assert s.inter_chunk_delay == pytest.approx(
+        1.0 / (medium_dl * OTA_DOWNLINK_UTILIZATION), rel=0.02
+    )
     assert s.block_size == 32
     # Report window comes from the schedule slotframe and grows with the fleet.
     assert settings_for_fleet("medium", 100).report_timeout > s.report_timeout

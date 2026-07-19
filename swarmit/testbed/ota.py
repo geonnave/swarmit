@@ -134,9 +134,11 @@ MARI_SCHEDULES: dict[str, "MariSchedule"] = {
     "huge": MariSchedule("huge", 149, 22, 102, 102),
 }
 
-# Share of the gateway's downlink slots OTA may drive once it is fast enough to
-# be radio-bound. NOT the binding constraint today - see DEVICE_CHUNK_RATE_HZ.
-OTA_DOWNLINK_UTILIZATION = 0.5
+# Share of the gateway's downlink slots OTA drives. This is the binding term now
+# that the device keeps up (see DEVICE_CHUNK_RATE_HZ). 0.75 leaves ~25% of the
+# D-slots for beacons/join/commands and headroom against the shared TX queue,
+# while pushing OTA at most of the radio's downlink capacity.
+OTA_DOWNLINK_UTILIZATION = 0.75
 
 # Device chunk-write ceiling. Once the firmware stopped acking every chunk (the
 # per-chunk uplink ack was throttling the transfer to the node's one uplink cell

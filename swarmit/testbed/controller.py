@@ -1079,6 +1079,12 @@ class Controller:
         settings = settings_for_fleet(
             schedule, len(devices), utilization, device_rate
         )
+        # Experiment knob: override the report-collection window (ms). Too short
+        # and a report that lands after the broker round trip reads as "missing"
+        # -> a spurious repair round.
+        report_ms = os.environ.get("SWARMIT_OTA_REPORT_MS")
+        if report_ms:
+            settings.report_timeout = float(report_ms) / 1000.0
         transfer = BlockTransfer(
             chunks=self.chunks,
             devices=list(devices),
