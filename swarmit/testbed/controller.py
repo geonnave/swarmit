@@ -1089,6 +1089,7 @@ class Controller:
         delivered = sum(r.confirmed_chunks for r in results.values())
         waste = transfer.chunk_sends / delivered if delivered else 0
         rate = delivered / elapsed if elapsed else 0
+        failed = {a: r for a, r in results.items() if not r.success}
         self.logger.info(
             "ota transfer complete",
             path="block",
@@ -1097,17 +1098,24 @@ class Controller:
             delivered=delivered,
             waste_ratio=round(waste, 2),
             chunk_per_s=round(rate, 2),
+            ok=not failed,
+            failed_devices=len(failed),
         )
-        if self.settings.verbose:
-            for addr, result in results.items():
-                self.logger.info(
-                    "device transfer result",
-                    addr=addr,
-                    confirmed=result.confirmed_chunks,
-                    total=result.total_chunks,
-                    finalized=result.finalized,
-                    straggler=result.straggler,
-                )
+        # Failures are surfaced at WARNING so they reach the console too, with
+        # enough detail to diagnose: which chunks are still missing per bot, and
+        # whether the whole-image finalize passed.
+        for addr, result in failed.items():
+            missing = transfer.missing_chunks(addr)
+            self.logger.warning(
+                "ota device failed",
+                addr=addr,
+                confirmed=result.confirmed_chunks,
+                total=result.total_chunks,
+                finalized=result.finalized,
+                straggler=result.straggler,
+                missing_count=len(missing),
+                missing_chunks=missing[:64],
+            )
         return self.transfer_data
 
     def transfer(

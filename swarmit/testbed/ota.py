@@ -319,6 +319,21 @@ class BlockTransfer:
         """Total chunks confirmed across all (device, block) so far."""
         return sum(popcount(mask) for mask in self._confirmed.values())
 
+    def missing_chunks(self, addr: str) -> list[int]:
+        """Absolute chunk indices this device has not confirmed."""
+        missing = []
+        for block in range(self.num_blocks):
+            full = self.full_block_mask(block)
+            got = self.confirmed_mask(addr, block)
+            gap = full & ~got
+            if not gap:
+                continue
+            start = block * self._w
+            for bit in range(self._w):
+                if gap & (1 << bit):
+                    missing.append(start + bit)
+        return missing
+
     def _dest(self, addr: str | None) -> int:
         if addr is None:
             return BROADCAST_ADDRESS
