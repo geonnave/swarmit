@@ -1078,14 +1078,28 @@ class Controller:
         # OTA_START_ACK; otherwise fall back to the legacy per-chunk path for
         # the whole group. (Per-subset dual-path is a follow-up - see
         # plans/swarmit-fast-ota/plan.html, Phase 2.)
-        if devices and all(
-            self._ota_versions.get(addr, OTA_PROTOCOL_VERSION_LEGACY)
-            >= OTA_PROTOCOL_VERSION_BLOCK
+        versions = {
+            addr: self._ota_versions.get(addr, OTA_PROTOCOL_VERSION_LEGACY)
             for addr in devices
-        ):
+        }
+        use_block = bool(devices) and all(
+            v >= OTA_PROTOCOL_VERSION_BLOCK for v in versions.values()
+        )
+        if use_block:
+            print(
+                "[bold green]OTA algorithm: BLOCK / bitmap-NACK (fast OTA)[/] "
+                f"- negotiated versions {versions}"
+            )
+            self.logger.info("ota path selected", path="block", versions=versions)
             return self._transfer_block_protocol(
                 firmware, devices, show_progress
             )
+        print(
+            "[bold yellow]OTA algorithm: LEGACY per-chunk stop-and-wait[/] "
+            f"- negotiated versions {versions} "
+            f"(need v>={OTA_PROTOCOL_VERSION_BLOCK} from every bot for block OTA)"
+        )
+        self.logger.info("ota path selected", path="legacy", versions=versions)
 
         data_size = len(firmware)
         use_progress_bar = show_progress and not self.settings.verbose
