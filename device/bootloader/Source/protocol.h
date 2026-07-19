@@ -25,6 +25,14 @@
 
 #define SWRMT_PREAMBLE_LENGTH       (8U)
 #define SWRMT_OTA_CHUNK_SIZE        (128U)
+#define SWRMT_OTA_SHA256_LENGTH     (32U)
+
+/// Block-OTA (fast OTA) parameters. W = 22 matches the 22 downlink slots per
+/// Mari "huge" slotframe; the received bitmap is a uint32_t so W may grow to 32
+/// without a wire change. The protocol version is echoed in OTA_START_ACK so the
+/// controller knows the bootloader speaks the block/bitmap path.
+#define SWRMT_OTA_BLOCK_SIZE        (22U)
+#define SWRMT_OTA_PROTOCOL_VERSION  (2U)
 
 /// First byte of a raw LH2 capture sample carried inside a LOG_EVENT payload.
 /// Lets the host tell a calibration sample apart from a regular text log line.
@@ -35,6 +43,25 @@ typedef struct __attribute__((packed)) {
     uint8_t  chunk_size;                        ///< Size of the chunk
     uint8_t  chunk[SWRMT_OTA_CHUNK_SIZE];       ///< Bytes array of the firmware chunk
 } swrmt_ota_chunk_pkt_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t block_index;                       ///< Block the controller is asking about
+    uint8_t  block_size;                        ///< Chunks per block (W)
+} swrmt_ota_block_report_req_pkt_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t block_index;                       ///< Block the device currently holds
+    uint32_t received_mask;                     ///< Bit i set: chunk block_index*W+i written
+    uint8_t  status;                            ///< Reserved (0)
+} swrmt_ota_block_report_resp_pkt_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  sha[SWRMT_OTA_SHA256_LENGTH];      ///< Expected SHA256 of the whole image
+} swrmt_ota_finalize_pkt_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  ok;                                ///< 1 if the image SHA256 matched
+} swrmt_ota_finalize_resp_pkt_t;
 
 typedef enum {
     SWRMT_APPLICATION_READY = 0,
@@ -55,6 +82,10 @@ typedef enum {
     SWRMT_MSG_OTA_CHUNK_ACK = 0x87,
     SWRMT_MSG_GPIO_EVENT = 0x88,
     SWRMT_MSG_LOG_EVENT = 0x89,
+    SWRMT_MSG_OTA_BLOCK_REPORT_REQ = 0x8A,   ///< host -> device: request received bitmap
+    SWRMT_MSG_OTA_BLOCK_REPORT_RESP = 0x8B,  ///< device -> host: received bitmap for a block
+    SWRMT_MSG_OTA_FINALIZE = 0x8C,           ///< host -> device: verify whole-image SHA256
+    SWRMT_MSG_OTA_FINALIZE_RESP = 0x8D,      ///< device -> host: image SHA256 match result
 } swrmt_message_type_t;
 
 /// Application type

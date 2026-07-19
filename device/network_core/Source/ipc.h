@@ -43,6 +43,7 @@ typedef enum {
     IPC_CHAN_OTA_CHUNK          = 7,    ///< Channel used for writing a non secure image chunk
     IPC_CHAN_CALIBRATION_DATA   = 8,    ///< Channel used for sending calibration data
     IPC_CHAN_LH2_CAPTURE        = 9,    ///< Channel used to trigger a raw LH2 capture (READY mode only)
+    IPC_CHAN_OTA_FINALIZE       = 10,   ///< Channel used to verify the whole image SHA256 (block OTA)
 } ipc_channels_t;
 
 typedef struct {
@@ -65,6 +66,10 @@ typedef struct __attribute__((packed)) {
     uint32_t chunk_index;
     uint32_t chunk_size;
     int32_t  last_chunk_acked;
+    uint32_t block_index;                                 ///< Current block being received (block OTA)
+    uint32_t received_mask;                               ///< Bit i set: chunk block_index*W+i written to flash
+    uint8_t  finalize_expected[SWRMT_OTA_SHA256_LENGTH];  ///< Expected whole-image SHA256 (FINALIZE)
+    uint8_t  finalize_ok;                                 ///< FINALIZE result (1 = image SHA256 matched)
     uint8_t chunk[INT8_MAX + 1];
 } ipc_ota_data_t;
 
