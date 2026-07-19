@@ -500,6 +500,8 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
         progress = None
         per_device_acked: dict[str, int] = {}
         device_results: list[dict] = []
+        n_blocks = 0
+        block_size = 1
         try:
             for ev in events:
                 etype = ev.get("type")
@@ -511,6 +513,13 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
                         f"Radio chunks ([bold]{CHUNK_SIZE}B[/bold]): "
                         f"{ev['total_chunks']}"
                     )
+                    n_blocks = ev.get("n_blocks", 0)
+                    block_size = ev.get("block_size", 1) or 1
+                    algo = (
+                        "block OTA"
+                        if ev.get("path") == "block"
+                        else "per-chunk"
+                    )
                     progress = tqdm(
                         total=ev["total_chunks"] * len(ev["devices"]),
                         unit="chunk",
@@ -519,7 +528,7 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
                         ncols=100,
                     )
                     progress.set_description(
-                        f"Flashing {len(ev['devices'])} bot(s)"
+                        f"Flashing {len(ev['devices'])} bot(s) · {algo}"
                     )
                 elif etype == "chunk":
                     if progress is None:
@@ -527,6 +536,13 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
                     prev = per_device_acked.get(ev["addr"], 0)
                     progress.update(ev["acked"] - prev)
                     per_device_acked[ev["addr"]] = ev["acked"]
+                    if n_blocks and per_device_acked:
+                        # Blocks fully delivered to the slowest bot, so the
+                        # indicator only advances once every bot has the block.
+                        done_blocks = min(per_device_acked.values()) // block_size
+                        progress.set_postfix_str(
+                            f"blk {min(done_blocks, n_blocks)}/{n_blocks}"
+                        )
                 elif etype == "device_done":
                     device_results.append(ev)
                 elif etype == "complete":

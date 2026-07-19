@@ -23,7 +23,11 @@ from swarmit.testbed.adapter import (
     MarilibEdgeAdapter,
 )
 from swarmit.testbed.logger import LOGGER
-from swarmit.testbed.ota import BlockOTASettings, BlockTransfer
+from swarmit.testbed.ota import (
+    BLOCK_SIZE_DEFAULT,
+    BlockOTASettings,
+    BlockTransfer,
+)
 from swarmit.testbed.protocol import (
     OTA_PROTOCOL_VERSION_BLOCK,
     OTA_PROTOCOL_VERSION_LEGACY,
@@ -985,6 +989,25 @@ class Controller:
             time.sleep(0.001)
             send = time.time() - send_time > self.settings.ota_timeout
 
+    @property
+    def ota_block_size(self) -> int:
+        """Chunks per block used by the block-OTA path."""
+        return BLOCK_SIZE_DEFAULT
+
+    def select_ota_path(self, devices) -> str:
+        """'block' if every target bot negotiated the block protocol, else 'legacy'."""
+        if not devices:
+            return "legacy"
+        return (
+            "block"
+            if all(
+                self._ota_versions.get(addr, OTA_PROTOCOL_VERSION_LEGACY)
+                >= OTA_PROTOCOL_VERSION_BLOCK
+                for addr in devices
+            )
+            else "legacy"
+        )
+
     def _transfer_block_protocol(
         self,
         firmware,
@@ -1075,17 +1098,15 @@ class Controller:
             waste_ratio=round(waste, 2),
             chunk_per_s=round(rate, 2),
         )
-        print(
-            f"[dim]block OTA: {transfer.chunk_sends} chunk sends for "
-            f"{delivered} delivered (waste x{waste:.2f}), "
-            f"{elapsed:.1f}s, {rate:.1f} chunk/s[/]"
-        )
         if self.settings.verbose:
             for addr, result in results.items():
-                print(
-                    f"{addr}: {result.confirmed_chunks}/{result.total_chunks} "
-                    f"chunks, finalized={result.finalized}, "
-                    f"straggler={result.straggler}"
+                self.logger.info(
+                    "device transfer result",
+                    addr=addr,
+                    confirmed=result.confirmed_chunks,
+                    total=result.total_chunks,
+                    finalized=result.finalized,
+                    straggler=result.straggler,
                 )
         return self.transfer_data
 
@@ -1109,24 +1130,17 @@ class Controller:
             addr: self._ota_versions.get(addr, OTA_PROTOCOL_VERSION_LEGACY)
             for addr in devices
         }
-        use_block = bool(devices) and all(
-            v >= OTA_PROTOCOL_VERSION_BLOCK for v in versions.values()
-        )
+        use_block = self.select_ota_path(devices) == "block"
         if use_block:
-            print(
-                "[bold green]OTA algorithm: BLOCK / bitmap-NACK (fast OTA)[/] "
-                f"- negotiated versions {versions}"
+            self.logger.info(
+                "ota path selected", path="block", versions=versions
             )
-            self.logger.info("ota path selected", path="block", versions=versions)
             return self._transfer_block_protocol(
                 firmware, devices, show_progress
             )
-        print(
-            "[bold yellow]OTA algorithm: LEGACY per-chunk stop-and-wait[/] "
-            f"- negotiated versions {versions} "
-            f"(need v>={OTA_PROTOCOL_VERSION_BLOCK} from every bot for block OTA)"
+        self.logger.info(
+            "ota path selected", path="legacy", versions=versions
         )
-        self.logger.info("ota path selected", path="legacy", versions=versions)
 
         data_size = len(firmware)
         self.logger.info(

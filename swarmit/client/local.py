@@ -99,12 +99,22 @@ class LocalSwarmitClient:
             }
             return
 
+        path = self._controller.select_ota_path(start_data["acked"])
+        block_size = self._controller.ota_block_size
+        total_chunks = len(self._controller.chunks)
         yield {
             "type": "flash_started",
             "image_size": len(fw),
-            "total_chunks": len(self._controller.chunks),
+            "total_chunks": total_chunks,
             "fw_hash": start_data["ota"].fw_hash.hex().upper(),
             "devices": sorted(start_data["acked"]),
+            "path": path,
+            "block_size": block_size,
+            "n_blocks": (
+                (total_chunks + block_size - 1) // block_size
+                if path == "block"
+                else 0
+            ),
         }
 
         # Run transfer in a thread; poll transfer_data while it runs.

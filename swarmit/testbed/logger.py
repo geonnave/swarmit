@@ -62,10 +62,14 @@ def setup_logging():
             },
         },
         "handlers": {
+            # Console stays quiet at INFO so structured logs never clobber the
+            # flash progress bar; the full INFO stream goes to the file handler
+            # below. Warnings and errors still reach the operator.
             "console": {
                 "formatter": "rich",
                 "class": "logging.StreamHandler",
                 "stream": "ext://sys.stderr",
+                "level": "WARNING",
             }
         },
         "loggers": {
