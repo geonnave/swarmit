@@ -1101,9 +1101,9 @@ class Controller:
             ok=not failed,
             failed_devices=len(failed),
         )
-        # Failures are surfaced at WARNING so they reach the console too, with
-        # enough detail to diagnose: which chunks are still missing per bot, and
-        # whether the whole-image finalize passed.
+        # Genuine failures (finalize SHA did not match, or no finalize response)
+        # are surfaced at WARNING so they reach the console too, with the missing
+        # chunk list for diagnosis.
         for addr, result in failed.items():
             missing = transfer.missing_chunks(addr)
             self.logger.warning(
@@ -1116,6 +1116,17 @@ class Controller:
                 missing_count=len(missing),
                 missing_chunks=missing[:64],
             )
+        # Image is good (finalize passed) but the delivery bitmap under-counted -
+        # a sign the report path churned under load. Not a failure, but worth a
+        # breadcrumb for tuning.
+        for addr, result in results.items():
+            if result.success and result.confirmed_chunks < result.total_chunks:
+                self.logger.info(
+                    "ota bitmap under-tracked",
+                    addr=addr,
+                    confirmed=result.confirmed_chunks,
+                    total=result.total_chunks,
+                )
         return self.transfer_data
 
     def transfer(

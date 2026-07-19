@@ -120,7 +120,13 @@ class DeviceResult:
 
     @property
     def success(self) -> bool:
-        return self.finalized and self.confirmed_chunks == self.total_chunks
+        # The whole-image finalize SHA256 is authoritative: if the device says
+        # it matches, every byte is correctly in flash - regardless of what the
+        # delivery bitmap tracked. Under heavy loss/retransmit the bitmap can
+        # under-count (a report is lost, or the device's per-block mask is
+        # overwritten as it advances) while the image is in fact complete;
+        # gating success on confirmed==total then fails a perfectly good flash.
+        return self.finalized
 
 
 class BlockTransfer:
