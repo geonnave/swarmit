@@ -99,7 +99,8 @@ static void _handle_packet(uint64_t dst_address, uint8_t *packet, uint8_t length
         return;
     }
 
-    if (((packet_type >= SWRMT_MSG_STATUS) && (packet_type <= SWRMT_MSG_OTA_CHUNK)) || (packet_type == SWRMT_MSG_LH2_CALIBRATION) || (packet_type == SWRMT_MSG_LH2_CAPTURE)) {
+    if (((packet_type >= SWRMT_MSG_STATUS) && (packet_type <= SWRMT_MSG_OTA_CHUNK)) || (packet_type == SWRMT_MSG_LH2_CALIBRATION) || (packet_type == SWRMT_MSG_LH2_CAPTURE) ||
+        (packet_type == SWRMT_MSG_OTA_BLOCK_REPORT_REQ) || (packet_type == SWRMT_MSG_OTA_FINALIZE)) {
         _app_vars.req_received = true;
         return;
     }
@@ -226,6 +227,7 @@ int main(void) {
     NRF_IPC_NS->SEND_CNF[IPC_CHAN_SOC_RESET]         = 1 << IPC_CHAN_SOC_RESET;
     NRF_IPC_NS->SEND_CNF[IPC_CHAN_OTA_START]         = 1 << IPC_CHAN_OTA_START;
     NRF_IPC_NS->SEND_CNF[IPC_CHAN_OTA_CHUNK]         = 1 << IPC_CHAN_OTA_CHUNK;
+    NRF_IPC_NS->SEND_CNF[IPC_CHAN_OTA_FINALIZE]      = 1 << IPC_CHAN_OTA_FINALIZE;
     NRF_IPC_NS->SEND_CNF[IPC_CHAN_CALIBRATION_DATA]  = 1 << IPC_CHAN_CALIBRATION_DATA;
     NRF_IPC_NS->SEND_CNF[IPC_CHAN_LH2_CAPTURE]       = 1 << IPC_CHAN_LH2_CAPTURE;
     NRF_IPC_NS->RECEIVE_CNF[IPC_CHAN_REQ]            = 1 << IPC_CHAN_REQ;
@@ -311,6 +313,10 @@ int main(void) {
                     mutex_lock();
                     ipc_shared_data.ota.image_size = pkt->image_size;
                     ipc_shared_data.ota.chunk_count = pkt->chunk_count;
+                    // Reset the block-OTA bitmap state for the new image.
+                    ipc_shared_data.ota.block_index = 0;
+                    ipc_shared_data.ota.received_mask = 0;
+                    ipc_shared_data.ota.finalize_ok = 0;
                     mutex_unlock();
                     printf("OTA Start request received (size: %u, chunks: %u)\n", ipc_shared_data.ota.image_size, ipc_shared_data.ota.chunk_count);
                     NRF_IPC_NS->TASKS_SEND[IPC_CHAN_OTA_START] = 1;
@@ -356,6 +362,43 @@ int main(void) {
                     }
                     printf("Process OTA chunk request (index: %u, size: %u)\n", ipc_shared_data.ota.chunk_index, ipc_shared_data.ota.chunk_size);
                     NRF_IPC_NS->TASKS_SEND[IPC_CHAN_OTA_CHUNK] = 1;
+                } break;
+                case SWRMT_MSG_OTA_BLOCK_REPORT_REQ:
+                {
+                    // Reply with the received-chunk bitmap for the block this
+                    // bot currently holds. The bootloader owns the bitmap (it
+                    // sets bits as it writes flash); the net core just reads the
+                    // shared copy and answers in the bot's own uplink slot, no
+                    // IPC round trip. A bot that has not started the requested
+                    // block reports an earlier block_index, which the controller
+                    // reads as "needs the whole block".
+                    size_t length = 0;
+                    _app_vars.notification_buffer[length++] = SWRMT_MSG_OTA_BLOCK_REPORT_RESP;
+                    mutex_lock();
+                    uint32_t block_index = ipc_shared_data.ota.block_index;
+                    uint32_t received_mask = ipc_shared_data.ota.received_mask;
+                    mutex_unlock();
+                    memcpy(&_app_vars.notification_buffer[length], &block_index, sizeof(uint32_t));
+                    length += sizeof(uint32_t);
+                    memcpy(&_app_vars.notification_buffer[length], &received_mask, sizeof(uint32_t));
+                    length += sizeof(uint32_t);
+                    _app_vars.notification_buffer[length++] = 0;  // status (reserved)
+                    mari_node_tx_payload(_app_vars.notification_buffer, length, &SWARMIT_TX_DEFAULT);
+                } break;
+                case SWRMT_MSG_OTA_FINALIZE:
+                {
+                    if (ipc_shared_data.status != SWRMT_APPLICATION_PROGRAMMING && ipc_shared_data.status != SWRMT_APPLICATION_READY) {
+                        break;
+                    }
+                    // Hand the expected whole-image SHA256 to the app core; it
+                    // reads back its own flash, compares, and sends the
+                    // FINALIZE_RESP itself (it owns the flash and the mari TX
+                    // shim, mirroring the chunk-ack path).
+                    const swrmt_ota_finalize_pkt_t *pkt = (const swrmt_ota_finalize_pkt_t *)req->data;
+                    mutex_lock();
+                    memcpy((uint8_t *)ipc_shared_data.ota.finalize_expected, pkt->sha, SWRMT_OTA_SHA256_LENGTH);
+                    mutex_unlock();
+                    NRF_IPC_NS->TASKS_SEND[IPC_CHAN_OTA_FINALIZE] = 1;
                 } break;
                 case SWRMT_MSG_LH2_CALIBRATION:
                 {
