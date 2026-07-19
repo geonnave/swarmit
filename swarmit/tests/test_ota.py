@@ -12,7 +12,7 @@ import pytest
 
 from swarmit.testbed.ota import (
     BROADCAST_ADDRESS,
-    DEVICE_CHUNK_RATE_HZ,
+    MARI_SCHEDULES,
     BlockOTASettings,
     BlockTransfer,
     settings_for_fleet,
@@ -155,10 +155,12 @@ def build(devices, image, settings=None, chunk_loss=None, report_loss=None):
 # --------------------------------------------------------------------------- #
 # Pure-helper tests.
 # --------------------------------------------------------------------------- #
-def test_settings_for_fleet_is_device_bound_today():
-    # Clamped to the device single-buffer rate: ~150 ms/chunk, block 32.
+def test_settings_for_fleet_derives_from_schedule():
+    # Default: radio downlink x utilization binds (device is fast enough now),
+    # ~24 ms/chunk on medium at util 0.5, block 32.
     s = settings_for_fleet("medium", 1)
-    assert s.inter_chunk_delay == pytest.approx(1.0 / DEVICE_CHUNK_RATE_HZ, rel=0.01)
+    medium_dl = MARI_SCHEDULES["medium"].downlink_pps
+    assert s.inter_chunk_delay == pytest.approx(1.0 / (medium_dl * 0.5), rel=0.02)
     assert s.block_size == 32
     # Report window comes from the schedule slotframe and grows with the fleet.
     assert settings_for_fleet("medium", 100).report_timeout > s.report_timeout
@@ -166,11 +168,11 @@ def test_settings_for_fleet_is_device_bound_today():
     assert settings_for_fleet("tiny", 1).report_timeout < s.report_timeout
 
 
-def test_settings_flip_lets_the_radio_bind():
-    # Raising the device rate (post-firmware) hands control to the radio x
-    # utilization term - injection gets much faster.
-    fast = settings_for_fleet("medium", 1, utilization=0.5, device_chunk_rate=1000)
-    assert fast.inter_chunk_delay < 0.03  # ~24 ms vs ~150 ms today
+def test_settings_device_rate_can_still_clamp():
+    # If a slower device rate is passed (e.g. a schedule/firmware regression),
+    # it clamps injection below the radio term.
+    slow = settings_for_fleet("medium", 1, utilization=1.0, device_chunk_rate=5.0)
+    assert slow.inter_chunk_delay == pytest.approx(1.0 / 5.0, rel=0.01)
 
 
 def test_block_layout_and_masks():

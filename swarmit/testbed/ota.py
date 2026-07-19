@@ -138,14 +138,14 @@ MARI_SCHEDULES: dict[str, "MariSchedule"] = {
 # be radio-bound. NOT the binding constraint today - see DEVICE_CHUNK_RATE_HZ.
 OTA_DOWNLINK_UTILIZATION = 0.5
 
-# THE FLIP KNOB. The netcore->bootloader OTA path is single-buffered today, so
-# clean chunk writes top out at ~12/s and pacing must stay well under it; this
-# is the conservative rate validated churn-free on hardware (~150 ms/chunk, the
-# 464-chunk image in ~137 s, waste ~1.1). Raise this toward the radio rate
-# (schedule downlink_pps) once the inter-core chunk ring lands in firmware - at
-# which point the schedule geometry above starts to bind and the report/delivery
-# model needs re-tuning (plan Phase C).
-DEVICE_CHUNK_RATE_HZ = 6.7
+# Device chunk-write ceiling. Once the firmware stopped acking every chunk (the
+# per-chunk uplink ack was throttling the transfer to the node's one uplink cell
+# per slotframe) and the shared chunk buffer read was guarded, the device
+# handles the full radio rate cleanly on hardware - a 12 ms/chunk (~84/s) inject
+# flashes the 464-chunk image in ~24 s (was ~137 s), finalize OK. So this is now
+# the radio rate, not the old ~6.7 single-buffer clamp; the schedule geometry
+# above (downlink_pps x utilization) is what actually binds.
+DEVICE_CHUNK_RATE_HZ = 84.0
 
 
 def settings_for_fleet(
@@ -168,11 +168,16 @@ def settings_for_fleet(
     """
     sched = MARI_SCHEDULES.get(schedule, MARI_SCHEDULES["medium"])
     inject_pps = max(1.0, min(sched.downlink_pps * utilization, device_chunk_rate))
+    inter_chunk = 1.0 / inject_pps
     report_slotframes = 2.0 + max(0, n_bots - 1) / max(1, sched.u_cells)
     return BlockOTASettings(
         block_size=BLOCK_SIZE_DEFAULT,
-        inter_chunk_delay=1.0 / inject_pps,
-        per_chunk_delivery=PER_CHUNK_DELIVERY_DEFAULT,
+        inter_chunk_delay=inter_chunk,
+        # We pace injection at the delivery rate, so a block drains as it is sent
+        # and the report wait only needs the collection window - no big residual.
+        # (With the pre-firmware per-chunk-ack path the device could not keep up
+        # and this needed a long drain margin; the ring/no-ack fix removes that.)
+        per_chunk_delivery=inter_chunk,
         report_timeout=sched.slotframe_s * report_slotframes,
         wait_cap=WAIT_CAP_DEFAULT,
     )

@@ -26,6 +26,7 @@ from swarmit.testbed.adapter import (
 from swarmit.testbed.logger import LOGGER
 from swarmit.testbed.ota import (
     BLOCK_SIZE_DEFAULT,
+    DEVICE_CHUNK_RATE_HZ,
     OTA_DOWNLINK_UTILIZATION,
     BlockTransfer,
     settings_for_fleet,
@@ -1072,7 +1073,12 @@ class Controller:
         utilization = float(
             os.environ.get("SWARMIT_OTA_UTILIZATION", OTA_DOWNLINK_UTILIZATION)
         )
-        settings = settings_for_fleet(schedule, len(devices), utilization)
+        device_rate = float(
+            os.environ.get("SWARMIT_OTA_DEVICE_RATE", DEVICE_CHUNK_RATE_HZ)
+        )
+        settings = settings_for_fleet(
+            schedule, len(devices), utilization, device_rate
+        )
         transfer = BlockTransfer(
             chunks=self.chunks,
             devices=list(devices),
