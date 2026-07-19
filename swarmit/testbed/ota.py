@@ -100,6 +100,84 @@ class BlockOTASettings:
     max_rounds_per_block: int = MAX_ROUNDS_PER_BLOCK_DEFAULT
 
 
+@dataclass(frozen=True)
+class MariSchedule:
+    """Geometry of a Mari schedule - the source of truth for OTA pacing.
+
+    A gateway transmits one downlink frame per D-cell per slotframe, and each
+    joined node gets one uplink cell per slotframe (so all nodes can report
+    within a single slotframe). These two facts drive the whole pacing model.
+    Cell counts from mari/firmware/mari/all_schedules.c.
+    """
+
+    name: str
+    n_slots: int
+    d_cells: int
+    u_cells: int
+    max_nodes: int
+    slot_s: float = 0.00178  # MARI_WHOLE_SLOT_DURATION (~1.78 ms)
+
+    @property
+    def slotframe_s(self) -> float:
+        return self.n_slots * self.slot_s
+
+    @property
+    def downlink_pps(self) -> float:
+        """Gateway downlink capacity in frames/s (all D-cells packed)."""
+        return self.d_cells / self.slotframe_s
+
+
+MARI_SCHEDULES: dict[str, "MariSchedule"] = {
+    "tiny": MariSchedule("tiny", 17, 2, 10, 10),
+    "medium": MariSchedule("medium", 67, 10, 44, 44),
+    "big": MariSchedule("big", 101, 16, 66, 66),
+    "huge": MariSchedule("huge", 149, 22, 102, 102),
+}
+
+# Share of the gateway's downlink slots OTA may drive once it is fast enough to
+# be radio-bound. NOT the binding constraint today - see DEVICE_CHUNK_RATE_HZ.
+OTA_DOWNLINK_UTILIZATION = 0.5
+
+# THE FLIP KNOB. The netcore->bootloader OTA path is single-buffered today, so
+# clean chunk writes top out at ~12/s and pacing must stay well under it; this
+# is the conservative rate validated churn-free on hardware (~150 ms/chunk, the
+# 464-chunk image in ~137 s, waste ~1.1). Raise this toward the radio rate
+# (schedule downlink_pps) once the inter-core chunk ring lands in firmware - at
+# which point the schedule geometry above starts to bind and the report/delivery
+# model needs re-tuning (plan Phase C).
+DEVICE_CHUNK_RATE_HZ = 6.7
+
+
+def settings_for_fleet(
+    schedule: str = "medium",
+    n_bots: int = 1,
+    utilization: float = OTA_DOWNLINK_UTILIZATION,
+    device_chunk_rate: float = DEVICE_CHUNK_RATE_HZ,
+) -> "BlockOTASettings":
+    """Derive block-OTA pacing from the Mari schedule, the device, and fleet size.
+
+    - inject rate = min(radio downlink x utilization, device chunk-write rate).
+      We broadcast, so one frame reaches every bot - the radio term is
+      independent of fleet size. The device term binds today.
+    - report window = a couple of slotframes (every bot reports within one),
+      growing gently as the fleet fills the uplink.
+
+    ``per_chunk_delivery`` is the conservative, HIL-validated churn-free delivery
+    estimate; it (and the report model generally) is deliberately not aggressive
+    and will be re-derived once the firmware ring raises the device rate.
+    """
+    sched = MARI_SCHEDULES.get(schedule, MARI_SCHEDULES["medium"])
+    inject_pps = max(1.0, min(sched.downlink_pps * utilization, device_chunk_rate))
+    report_slotframes = 2.0 + max(0, n_bots - 1) / max(1, sched.u_cells)
+    return BlockOTASettings(
+        block_size=BLOCK_SIZE_DEFAULT,
+        inter_chunk_delay=1.0 / inject_pps,
+        per_chunk_delivery=PER_CHUNK_DELIVERY_DEFAULT,
+        report_timeout=sched.slotframe_s * report_slotframes,
+        wait_cap=WAIT_CAP_DEFAULT,
+    )
+
+
 class ChunkLike(Protocol):
     """Minimal shape the transfer needs from a chunk (controller.DataChunk)."""
 

@@ -12,8 +12,10 @@ import pytest
 
 from swarmit.testbed.ota import (
     BROADCAST_ADDRESS,
+    DEVICE_CHUNK_RATE_HZ,
     BlockOTASettings,
     BlockTransfer,
+    settings_for_fleet,
 )
 from swarmit.testbed.protocol import (
     PayloadOTABlockReportReq,
@@ -153,6 +155,24 @@ def build(devices, image, settings=None, chunk_loss=None, report_loss=None):
 # --------------------------------------------------------------------------- #
 # Pure-helper tests.
 # --------------------------------------------------------------------------- #
+def test_settings_for_fleet_is_device_bound_today():
+    # Clamped to the device single-buffer rate: ~150 ms/chunk, block 32.
+    s = settings_for_fleet("medium", 1)
+    assert s.inter_chunk_delay == pytest.approx(1.0 / DEVICE_CHUNK_RATE_HZ, rel=0.01)
+    assert s.block_size == 32
+    # Report window comes from the schedule slotframe and grows with the fleet.
+    assert settings_for_fleet("medium", 100).report_timeout > s.report_timeout
+    # A denser schedule (shorter slotframe) gives a shorter report window.
+    assert settings_for_fleet("tiny", 1).report_timeout < s.report_timeout
+
+
+def test_settings_flip_lets_the_radio_bind():
+    # Raising the device rate (post-firmware) hands control to the radio x
+    # utilization term - injection gets much faster.
+    fast = settings_for_fleet("medium", 1, utilization=0.5, device_chunk_rate=1000)
+    assert fast.inter_chunk_delay < 0.03  # ~24 ms vs ~150 ms today
+
+
 def test_block_layout_and_masks():
     image = make_image(10 * CHUNK_SIZE + 5)  # 11 chunks, W=4 -> 3 blocks
     bt, *_ = build(["AABB"], image)

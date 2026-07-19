@@ -26,8 +26,9 @@ from swarmit.testbed.adapter import (
 from swarmit.testbed.logger import LOGGER
 from swarmit.testbed.ota import (
     BLOCK_SIZE_DEFAULT,
-    BlockOTASettings,
+    OTA_DOWNLINK_UTILIZATION,
     BlockTransfer,
+    settings_for_fleet,
 )
 from swarmit.testbed.protocol import (
     OTA_PROTOCOL_VERSION_BLOCK,
@@ -1063,12 +1064,21 @@ class Controller:
         }
         if drop_chunks:
             self.logger.warning("ota test: dropping chunks", chunks=sorted(drop_chunks))
+        # Pacing is derived from the Mari schedule geometry and fleet size, but
+        # currently clamped to the device's single-buffer chunk rate (see
+        # ota.DEVICE_CHUNK_RATE_HZ). Schedule + utilization are env-overridable
+        # for the eventual flip once the firmware ring lands.
+        schedule = os.environ.get("SWARMIT_MARI_SCHEDULE", "medium")
+        utilization = float(
+            os.environ.get("SWARMIT_OTA_UTILIZATION", OTA_DOWNLINK_UTILIZATION)
+        )
+        settings = settings_for_fleet(schedule, len(devices), utilization)
         transfer = BlockTransfer(
             chunks=self.chunks,
             devices=list(devices),
             send_payload=self.send_payload,
             image_sha=self.start_ota_data.fw_hash,
-            settings=BlockOTASettings(),
+            settings=settings,
             broadcast=broadcast,
             on_progress=on_progress,
             logger=self.logger,
@@ -1079,7 +1089,10 @@ class Controller:
             path="block",
             image_bytes=data_size,
             total_chunks=len(self.chunks),
-            block_size=transfer.settings.block_size,
+            schedule=schedule,
+            block_size=settings.block_size,
+            inter_chunk_ms=round(settings.inter_chunk_delay * 1000, 1),
+            report_timeout_ms=round(settings.report_timeout * 1000, 1),
             devices=len(devices),
         )
         self._block_transfer = transfer
