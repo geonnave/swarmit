@@ -1041,11 +1041,21 @@ class Controller:
             on_progress=on_progress,
             logger=self.logger,
         )
+        self.logger.info(
+            "ota transfer start",
+            path="block",
+            image_bytes=data_size,
+            total_chunks=len(self.chunks),
+            block_size=transfer.settings.block_size,
+            devices=len(devices),
+        )
         self._block_transfer = transfer
+        start_ts = time.time()
         try:
             results = transfer.run()
         finally:
             self._block_transfer = None
+        elapsed = time.time() - start_ts
         if progress is not None:
             progress.close()
 
@@ -1055,9 +1065,20 @@ class Controller:
                 td.success = result.success
         delivered = sum(r.confirmed_chunks for r in results.values())
         waste = transfer.chunk_sends / delivered if delivered else 0
+        rate = delivered / elapsed if elapsed else 0
+        self.logger.info(
+            "ota transfer complete",
+            path="block",
+            elapsed_s=round(elapsed, 2),
+            chunk_sends=transfer.chunk_sends,
+            delivered=delivered,
+            waste_ratio=round(waste, 2),
+            chunk_per_s=round(rate, 2),
+        )
         print(
             f"[dim]block OTA: {transfer.chunk_sends} chunk sends for "
-            f"{delivered} delivered (waste x{waste:.2f})[/]"
+            f"{delivered} delivered (waste x{waste:.2f}), "
+            f"{elapsed:.1f}s, {rate:.1f} chunk/s[/]"
         )
         if self.settings.verbose:
             for addr, result in results.items():
@@ -1108,6 +1129,14 @@ class Controller:
         self.logger.info("ota path selected", path="legacy", versions=versions)
 
         data_size = len(firmware)
+        self.logger.info(
+            "ota transfer start",
+            path="legacy",
+            image_bytes=data_size,
+            total_chunks=len(self.chunks),
+            devices=len(devices),
+        )
+        legacy_start_ts = time.time()
         use_progress_bar = show_progress and not self.settings.verbose
         if use_progress_bar:
             progress = tqdm(
@@ -1157,4 +1186,22 @@ class Controller:
                     chunk.acked for chunk in device_data.chunks
                 )
                 self.transfer_data[device] = device_data
+        legacy_elapsed = time.time() - legacy_start_ts
+        delivered = sum(
+            sum(1 for c in td.chunks if c.acked)
+            for td in self.transfer_data.values()
+        )
+        total_retries = sum(
+            c.retries for td in self.transfer_data.values() for c in td.chunks
+        )
+        self.logger.info(
+            "ota transfer complete",
+            path="legacy",
+            elapsed_s=round(legacy_elapsed, 2),
+            delivered=delivered,
+            retries=total_retries,
+            chunk_per_s=round(
+                delivered / legacy_elapsed if legacy_elapsed else 0, 2
+            ),
+        )
         return self.transfer_data

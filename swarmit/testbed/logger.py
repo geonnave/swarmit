@@ -7,12 +7,27 @@
 
 import logging
 import logging.config
+import os
+from pathlib import Path
 
 import structlog
 
 
+def log_file_path() -> Path:
+    """Persistent swarmit log file (override with SWARMIT_LOG_FILE)."""
+    override = os.environ.get("SWARMIT_LOG_FILE")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".dotbot" / "logs" / "swarmit.log"
+
+
 def setup_logging():
-    """Setup logging."""
+    """Setup logging.
+
+    Logs go to stderr (rich, for the operator) and, when the log directory is
+    writable, are also appended as parseable logfmt lines to
+    ``log_file_path()`` so a flash run can be analysed after the fact.
+    """
     processors = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_logger_name,
@@ -61,6 +76,24 @@ def setup_logging():
             },
         },
     }
+
+    # Best-effort persistent file log (parseable logfmt); never let a
+    # non-writable log dir break the CLI.
+    try:
+        path = log_file_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stdlib_config["handlers"]["file"] = {
+            "formatter": "logfmt",
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": str(path),
+            "maxBytes": 5_000_000,
+            "backupCount": 3,
+            "mode": "a",
+        }
+        stdlib_config["loggers"]["swarmit"]["handlers"].append("file")
+    except OSError:
+        pass
+
     logging.config.dictConfig(stdlib_config)
 
 

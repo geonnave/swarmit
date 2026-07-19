@@ -298,6 +298,14 @@ class BlockTransfer:
     def chunk_sends(self) -> int:
         return self._chunk_sends
 
+    def _log(self, event: str, **fields) -> None:
+        if self._logger is not None:
+            self._logger.info(event, **fields)
+
+    def _delivered_total(self) -> int:
+        """Total chunks confirmed across all (device, block) so far."""
+        return sum(popcount(mask) for mask in self._confirmed.values())
+
     def _dest(self, addr: str | None) -> int:
         if addr is None:
             return BROADCAST_ADDRESS
@@ -364,7 +372,16 @@ class BlockTransfer:
                 self._send_report_req(block, target)
             self._sleep(self.report_wait(sent_this_round))
             self._evaluate_round(block)
-            if self.block_settled(block):
+            settled = self.block_settled(block)
+            self._log(
+                "block round",
+                block=block,
+                round=self._round,
+                sent=sent_this_round,
+                delivered=self._delivered_total(),
+                settled=settled,
+            )
+            if settled:
                 break
             needed = set(
                 self.indices_from_mask(block, self.repair_mask(block))
@@ -376,6 +393,13 @@ class BlockTransfer:
         for addr in self.devices:
             if not self.device_clean(addr, block):
                 self._incomplete[addr].add(block)
+        self._log(
+            "block done",
+            block=block,
+            rounds=self._round + 1,
+            sends=self._chunk_sends,
+            delivered=self._delivered_total(),
+        )
 
     def _evaluate_round(self, block: int) -> None:
         with self._lock:
