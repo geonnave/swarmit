@@ -165,6 +165,7 @@ class BlockTransfer:
         sleep: Callable[[float], None] = time.sleep,
         on_progress: Callable[[str, int], None] | None = None,
         logger=None,
+        drop_chunks: Iterable[int] | None = None,
     ):
         self.chunks = list(chunks)
         self.devices = list(devices)
@@ -173,6 +174,9 @@ class BlockTransfer:
         self.settings = settings or BlockOTASettings()
         self.broadcast = broadcast
         self._sleep = sleep
+        # Test hook: chunk indices to never transmit, simulating permanent loss
+        # (proves the finalize SHA catches a genuinely incomplete image).
+        self._drop_chunks = set(drop_chunks or ())
         self._on_progress = on_progress
         self._logger = logger
 
@@ -348,6 +352,8 @@ class BlockTransfer:
     def _send_chunks(self, indices: Iterable[int], addr: str | None) -> None:
         dest = self._dest(addr)
         for idx in sorted(indices):
+            if idx in self._drop_chunks:
+                continue
             chunk = self.chunks[idx]
             self._send_payload(
                 dest,

@@ -1,6 +1,7 @@
 """Module containing the swarmit controller class."""
 
 import dataclasses
+import os
 import threading
 import time
 from binascii import hexlify
@@ -1054,6 +1055,14 @@ class Controller:
                     progress.update(self.chunks[chunk_index].size)
 
         broadcast = not self.settings.devices
+        # Test hook: SWARMIT_OTA_TEST_DROP=200,201 makes the transfer never send
+        # those chunks, to verify the finalize SHA rejects an incomplete image.
+        drop_env = os.environ.get("SWARMIT_OTA_TEST_DROP", "")
+        drop_chunks = {
+            int(x) for x in drop_env.split(",") if x.strip().lstrip("-").isdigit()
+        }
+        if drop_chunks:
+            self.logger.warning("ota test: dropping chunks", chunks=sorted(drop_chunks))
         transfer = BlockTransfer(
             chunks=self.chunks,
             devices=list(devices),
@@ -1063,6 +1072,7 @@ class Controller:
             broadcast=broadcast,
             on_progress=on_progress,
             logger=self.logger,
+            drop_chunks=drop_chunks,
         )
         self.logger.info(
             "ota transfer start",
