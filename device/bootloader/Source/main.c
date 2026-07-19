@@ -52,6 +52,7 @@ extern volatile __attribute__((section(".shared_data"))) ipc_shared_data_t ipc_s
 
 typedef struct {
     uint8_t         notification_buffer[255]  __attribute__((aligned));
+    uint8_t         chunk_copy[SWRMT_OTA_CHUNK_SIZE];  ///< snapshot of the shared chunk, taken under mutex before the slow flash write
     uint32_t        base_addr;
     bool            ota_start_request;
     bool            ota_require_erase;
@@ -437,39 +438,51 @@ int main(void) {
         if (_bootloader_vars.ota_chunk_request) {
             _bootloader_vars.ota_chunk_request = false;
 
-            if (ipc_shared_data.ota.last_chunk_acked != (int32_t)ipc_shared_data.ota.chunk_index) {
-                // Write chunk to flash
-                uint32_t addr = _bootloader_vars.base_addr + ipc_shared_data.ota.chunk_index * SWRMT_OTA_CHUNK_SIZE;
-                printf("Writing chunk %d/%d at address %p\n", ipc_shared_data.ota.chunk_index, ipc_shared_data.ota.chunk_count - 1, (uint32_t *)addr);
-                nvmc_write((uint32_t *)addr, (void *)ipc_shared_data.ota.chunk, ipc_shared_data.ota.chunk_size);
-                _bootloader_vars.ota_require_erase = true;
-            }
-
-            // Block-OTA bitmap: reset the mask when the block advances, then
-            // mark this chunk received. Runs for duplicates too (a re-sent chunk
-            // still means the bot has it); the net core reads this to answer
-            // block-report requests. Reset keys on block change, not on chunk
-            // index 0, so a repair re-send of another bot's chunk 0 does not
-            // wipe this bot's in-progress block.
-            uint32_t blk = ipc_shared_data.ota.chunk_index / SWRMT_OTA_BLOCK_SIZE;
+            // Snapshot index/size and the chunk data under the mutex (so we never
+            // read a torn buffer while the net core publishes the next chunk),
+            // advance the block window, and dedup on the mask ("already in
+            // flash") - so a retransmit is never written twice (nWRITE=2 safety).
+            // Reset the mask on block change, not on chunk index 0, so a repair
+            // re-send of another bot's chunk 0 does not wipe an in-progress block.
             mutex_lock();
+            uint32_t index = ipc_shared_data.ota.chunk_index;
+            uint32_t size  = ipc_shared_data.ota.chunk_size;
+            uint32_t blk   = index / SWRMT_OTA_BLOCK_SIZE;
+            uint32_t bit   = 1u << (index % SWRMT_OTA_BLOCK_SIZE);
             if (blk != ipc_shared_data.ota.block_index) {
                 ipc_shared_data.ota.block_index = blk;
                 ipc_shared_data.ota.received_mask = 0;
             }
-            ipc_shared_data.ota.received_mask |= (1u << (ipc_shared_data.ota.chunk_index % SWRMT_OTA_BLOCK_SIZE));
+            bool need_write = (ipc_shared_data.ota.received_mask & bit) == 0;
+            if (need_write) {
+                memcpy(_bootloader_vars.chunk_copy, (void *)ipc_shared_data.ota.chunk, size);
+            }
             mutex_unlock();
 
-            // Notify chunk has been written
-            size_t length = 0;
-            _bootloader_vars.notification_buffer[length++] = SWRMT_MSG_OTA_CHUNK_ACK;
-            memcpy(_bootloader_vars.notification_buffer + length, (void *)&ipc_shared_data.ota.chunk_index, sizeof(uint32_t));
-            length += sizeof(uint32_t);
-            ipc_shared_data.ota.last_chunk_acked = ipc_shared_data.ota.chunk_index;
-            mari_node_tx(_bootloader_vars.notification_buffer, length);
+            if (need_write) {
+                uint32_t addr = _bootloader_vars.base_addr + index * SWRMT_OTA_CHUNK_SIZE;
+                nvmc_write((uint32_t *)addr, (void *)_bootloader_vars.chunk_copy, size);
+                _bootloader_vars.ota_require_erase = true;
+                mutex_lock();
+                ipc_shared_data.ota.received_mask |= bit;
+                mutex_unlock();
+            }
+            ipc_shared_data.ota.last_chunk_acked = (int32_t)index;
 
-            // If last chunk, finalize computed hash, set back to ready state
-            if (ipc_shared_data.ota.chunk_index == ipc_shared_data.ota.chunk_count - 1) {
+            // Per-chunk ack ONLY for the legacy per-chunk protocol. In block mode
+            // (version >= 2) the controller tracks delivery via block reports;
+            // an uplink ack per chunk would throttle the transfer to the node's
+            // single uplink cell per slotframe.
+            if (ipc_shared_data.ota.protocol_version < SWRMT_OTA_PROTOCOL_VERSION) {
+                size_t length = 0;
+                _bootloader_vars.notification_buffer[length++] = SWRMT_MSG_OTA_CHUNK_ACK;
+                memcpy(_bootloader_vars.notification_buffer + length, (void *)&index, sizeof(uint32_t));
+                length += sizeof(uint32_t);
+                mari_node_tx(_bootloader_vars.notification_buffer, length);
+            }
+
+            // If last chunk, set back to ready state
+            if (index == ipc_shared_data.ota.chunk_count - 1) {
                 ipc_shared_data.status = SWRMT_APPLICATION_READY;
             }
         }

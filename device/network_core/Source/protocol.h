@@ -91,6 +91,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint32_t image_size;                        ///< User image size in bytes
     uint32_t chunk_count;
+    uint8_t  version;                           ///< OTA protocol version (2 = block; absent/other = legacy)
 } swrmt_ota_start_pkt_t;
 
 typedef struct __attribute__((packed)) {
