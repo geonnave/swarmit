@@ -16,6 +16,10 @@ from tqdm import tqdm
 
 from swarmit import __version__
 from swarmit.client import build_client
+from swarmit.testbed.adapter import (
+    DEVICE_CHUNK_RATE_HZ,
+    OTA_DOWNLINK_UTILIZATION,
+)
 from swarmit.testbed.controller import (
     CHUNK_SIZE,
     OTA_ACK_TIMEOUT_DEFAULT,
@@ -171,6 +175,11 @@ DEFAULTS = {
     # See https://crystalfree.atlassian.net/wiki/spaces/Mari/pages/3324903426/Registry+of+Mari+Network+IDs
     "swarmit_network_id": "1200",
     "mqtt_use_tls": False,
+    # OTA pacing. The transfer paces itself from the schedule the gateway
+    # reports; these scale that derivation. 0 means "derive it".
+    "ota_utilization": OTA_DOWNLINK_UTILIZATION,
+    "ota_device_chunk_rate": DEVICE_CHUNK_RATE_HZ,
+    "ota_report_timeout": 0,
     "verbose": False,
 }
 
@@ -344,6 +353,9 @@ def main(
         network_id=int(final_config["swarmit_network_id"], 16),
         adapter=final_config["adapter"],
         devices=[d for d in final_config["devices"].split(",") if d],
+        ota_utilization=float(final_config["ota_utilization"]),
+        ota_device_chunk_rate=float(final_config["ota_device_chunk_rate"]),
+        ota_report_timeout=float(final_config["ota_report_timeout"]),
         verbose=final_config["verbose"],
     )
 

@@ -12,11 +12,8 @@ import pytest
 
 from swarmit.testbed.ota import (
     BROADCAST_ADDRESS,
-    MARI_SCHEDULES,
-    OTA_DOWNLINK_UTILIZATION,
     BlockOTASettings,
     BlockTransfer,
-    settings_for_fleet,
 )
 from swarmit.testbed.protocol import (
     PayloadOTABlockReportReq,
@@ -156,28 +153,6 @@ def build(devices, image, settings=None, chunk_loss=None, report_loss=None):
 # --------------------------------------------------------------------------- #
 # Pure-helper tests.
 # --------------------------------------------------------------------------- #
-def test_settings_for_fleet_derives_from_schedule():
-    # Default: radio downlink x utilization binds (device is fast enough now),
-    # ~24 ms/chunk on medium at util 0.5, block 32.
-    s = settings_for_fleet("medium", 1)
-    medium_dl = MARI_SCHEDULES["medium"].downlink_pps
-    assert s.inter_chunk_delay == pytest.approx(
-        1.0 / (medium_dl * OTA_DOWNLINK_UTILIZATION), rel=0.02
-    )
-    assert s.block_size == 32
-    # Report window comes from the schedule slotframe and grows with the fleet.
-    assert settings_for_fleet("medium", 100).report_timeout > s.report_timeout
-    # A denser schedule (shorter slotframe) gives a shorter report window.
-    assert settings_for_fleet("tiny", 1).report_timeout < s.report_timeout
-
-
-def test_settings_device_rate_can_still_clamp():
-    # If a slower device rate is passed (e.g. a schedule/firmware regression),
-    # it clamps injection below the radio term.
-    slow = settings_for_fleet("medium", 1, utilization=1.0, device_chunk_rate=5.0)
-    assert slow.inter_chunk_delay == pytest.approx(1.0 / 5.0, rel=0.01)
-
-
 def test_block_layout_and_masks():
     image = make_image(10 * CHUNK_SIZE + 5)  # 11 chunks, W=4 -> 3 blocks
     bt, *_ = build(["AABB"], image)

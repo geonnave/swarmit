@@ -18,6 +18,10 @@ tested with a fake transport and zero real time: ``send_payload``, ``clock`` and
 ``sleep`` are all parameters. ``on_report`` / ``on_finalize_resp`` are fed from
 the controller's RX thread (or a test), guarded by a lock.
 
+Nothing here knows what radio it is running on. How fast chunks may be
+injected and how long a report window needs to be are properties of the link,
+so they arrive as a :class:`BlockOTASettings` derived by the adapter.
+
 Reference: BLE Mesh DFU BLOB Transfer (Push mode) for the block/bitmap shape,
 RFC 9177 (CoAP Q-Block) for burst pacing and exponential backoff. Design and
 rationale live in ``plans/swarmit-fast-ota/plan.html``.
@@ -98,91 +102,6 @@ class BlockOTASettings:
     straggler_max_rounds: int = STRAGGLER_MAX_ROUNDS_DEFAULT
     finalize_max_rounds: int = FINALIZE_MAX_ROUNDS_DEFAULT
     max_rounds_per_block: int = MAX_ROUNDS_PER_BLOCK_DEFAULT
-
-
-@dataclass(frozen=True)
-class MariSchedule:
-    """Geometry of a Mari schedule - the source of truth for OTA pacing.
-
-    A gateway transmits one downlink frame per D-cell per slotframe, and each
-    joined node gets one uplink cell per slotframe (so all nodes can report
-    within a single slotframe). These two facts drive the whole pacing model.
-    Cell counts from mari/firmware/mari/all_schedules.c.
-    """
-
-    name: str
-    n_slots: int
-    d_cells: int
-    u_cells: int
-    max_nodes: int
-    slot_s: float = 0.00178  # MARI_WHOLE_SLOT_DURATION (~1.78 ms)
-
-    @property
-    def slotframe_s(self) -> float:
-        return self.n_slots * self.slot_s
-
-    @property
-    def downlink_pps(self) -> float:
-        """Gateway downlink capacity in frames/s (all D-cells packed)."""
-        return self.d_cells / self.slotframe_s
-
-
-MARI_SCHEDULES: dict[str, "MariSchedule"] = {
-    "tiny": MariSchedule("tiny", 17, 2, 10, 10),
-    "medium": MariSchedule("medium", 67, 10, 44, 44),
-    "big": MariSchedule("big", 101, 16, 66, 66),
-    "huge": MariSchedule("huge", 149, 22, 102, 102),
-}
-
-# Share of the gateway's downlink slots OTA drives. This is the binding term now
-# that the device keeps up (see DEVICE_CHUNK_RATE_HZ). 0.75 leaves ~25% of the
-# D-slots for beacons/join/commands and headroom against the shared TX queue,
-# while pushing OTA at most of the radio's downlink capacity.
-OTA_DOWNLINK_UTILIZATION = 0.75
-
-# Device chunk-write ceiling. Once the firmware stopped acking every chunk (the
-# per-chunk uplink ack was throttling the transfer to the node's one uplink cell
-# per slotframe) and the shared chunk buffer read was guarded, the device
-# handles the full radio rate cleanly on hardware - a 12 ms/chunk (~84/s) inject
-# flashes the 464-chunk image in ~24 s (was ~137 s), finalize OK. So this is now
-# the radio rate, not the old ~6.7 single-buffer clamp; the schedule geometry
-# above (downlink_pps x utilization) is what actually binds.
-DEVICE_CHUNK_RATE_HZ = 84.0
-
-
-def settings_for_fleet(
-    schedule: str = "medium",
-    n_bots: int = 1,
-    utilization: float = OTA_DOWNLINK_UTILIZATION,
-    device_chunk_rate: float = DEVICE_CHUNK_RATE_HZ,
-) -> "BlockOTASettings":
-    """Derive block-OTA pacing from the Mari schedule, the device, and fleet size.
-
-    - inject rate = min(radio downlink x utilization, device chunk-write rate).
-      We broadcast, so one frame reaches every bot - the radio term is
-      independent of fleet size. The device term binds today.
-    - report window = a couple of slotframes (every bot reports within one),
-      growing gently as the fleet fills the uplink.
-
-    ``per_chunk_delivery`` is the conservative, HIL-validated churn-free delivery
-    estimate; it (and the report model generally) is deliberately not aggressive
-    and will be re-derived once the firmware ring raises the device rate.
-    """
-    sched = MARI_SCHEDULES.get(schedule, MARI_SCHEDULES["medium"])
-    inject_pps = max(1.0, min(sched.downlink_pps * utilization, device_chunk_rate))
-    inter_chunk = 1.0 / inject_pps
-    report_slotframes = 2.0 + max(0, n_bots - 1) / max(1, sched.u_cells)
-    return BlockOTASettings(
-        block_size=BLOCK_SIZE_DEFAULT,
-        inter_chunk_delay=inter_chunk,
-        # We pace injection at the delivery rate, so a block drains as it is sent
-        # and the report wait only needs the collection window - no big residual.
-        # (With the pre-firmware per-chunk-ack path the device could not keep up
-        # and this needed a long drain margin; the ring/no-ack fix removes that.)
-        per_chunk_delivery=inter_chunk,
-        report_timeout=sched.slotframe_s * report_slotframes,
-        wait_cap=WAIT_CAP_DEFAULT,
-    )
 
 
 class ChunkLike(Protocol):

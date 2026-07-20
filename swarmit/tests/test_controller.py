@@ -572,7 +572,7 @@ def test_controller_send_lh2_calibration_raw_format_rejected():
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
-@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
+@patch("swarmit.testbed.controller.derive_block_settings", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
@@ -602,7 +602,7 @@ def test_controller_ota_broadcast():
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
-@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
+@patch("swarmit.testbed.controller.derive_block_settings", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
@@ -634,7 +634,7 @@ def test_controller_ota_broadcast_verbose():
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
-@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
+@patch("swarmit.testbed.controller.derive_block_settings", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
@@ -668,7 +668,7 @@ def test_controller_ota_unicast():
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
-@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
+@patch("swarmit.testbed.controller.derive_block_settings", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
@@ -707,7 +707,7 @@ def test_controller_ota_repairs_lost_chunks():
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
-@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
+@patch("swarmit.testbed.controller.derive_block_settings", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
@@ -731,7 +731,7 @@ def test_controller_ota_finalize_mismatch_fails():
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
-@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
+@patch("swarmit.testbed.controller.derive_block_settings", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )

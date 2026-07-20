@@ -19,18 +19,16 @@ from rich.text import Text
 from tqdm import tqdm
 
 from swarmit.testbed.adapter import (
-    GatewayAdapterBase,
-    MarilibCloudAdapter,
-    MarilibEdgeAdapter,
-)
-from swarmit.testbed.logger import LOGGER
-from swarmit.testbed.ota import (
-    BLOCK_SIZE_DEFAULT,
     DEVICE_CHUNK_RATE_HZ,
     OTA_DOWNLINK_UTILIZATION,
-    BlockTransfer,
-    settings_for_fleet,
+    GatewayAdapterBase,
+    LinkGeometry,
+    MarilibCloudAdapter,
+    MarilibEdgeAdapter,
+    derive_block_settings,
 )
+from swarmit.testbed.logger import LOGGER
+from swarmit.testbed.ota import BLOCK_SIZE_DEFAULT, BlockTransfer
 from swarmit.testbed.protocol import (
     OTA_PROTOCOL_VERSION_BLOCK,
     OTA_PROTOCOL_VERSION_LEGACY,
@@ -64,6 +62,19 @@ BROADCAST_ADDRESS = 0xFFFFFFFFFFFFFFFF
 VOLTAGE_MAX = 3000  # mV
 VOLTAGE_FULL = 2900  # mV
 VOLTAGE_WARNING = 1500  # mV
+
+
+def _test_drop_chunks() -> set[int]:
+    """Chunk indices to silently never transmit (fault injection).
+
+    Set SWARMIT_OTA_TEST_DROP=200,201 to prove the finalize SHA256 rejects an
+    incomplete image. This is a test seam, not configuration, which is why it
+    lives in the environment and not in the settings file.
+    """
+    raw = os.environ.get("SWARMIT_OTA_TEST_DROP", "")
+    return {
+        int(x) for x in raw.split(",") if x.strip().lstrip("-").isdigit()
+    }
 
 
 class StaleBootloaderError(Exception):
@@ -409,8 +420,17 @@ class ControllerSettings:
     map_size: str = "2500x2500"
     # in mm; 0 = infer from map_size as min(w, h) / 5
     calibration_distance: int = 0
+    # OTA_START retry budget (the block transfer does its own repair rounds).
     ota_max_retries: int = OTA_MAX_RETRIES_DEFAULT
     ota_timeout: float = OTA_ACK_TIMEOUT_DEFAULT
+    # Share of the gateway's downlink the OTA transfer may drive, and the
+    # per-bot chunk-write ceiling. Together they set the chunk inject rate.
+    ota_utilization: float = OTA_DOWNLINK_UTILIZATION
+    ota_device_chunk_rate: float = DEVICE_CHUNK_RATE_HZ
+    # Report-collection window in seconds; 0 derives it from the link geometry.
+    # Too short and a report arriving after the broker round trip reads as
+    # missing, costing a spurious repair round.
+    ota_report_timeout: float = 0
     adapter_wait_timeout: float = 3
     verbose: bool = False
 
@@ -1007,34 +1027,28 @@ class Controller:
                     progress.update(self.chunks[chunk_index].size)
 
         broadcast = not self.settings.devices
-        # Test hook: SWARMIT_OTA_TEST_DROP=200,201 makes the transfer never send
-        # those chunks, to verify the finalize SHA rejects an incomplete image.
-        drop_env = os.environ.get("SWARMIT_OTA_TEST_DROP", "")
-        drop_chunks = {
-            int(x) for x in drop_env.split(",") if x.strip().lstrip("-").isdigit()
-        }
+        drop_chunks = _test_drop_chunks()
         if drop_chunks:
-            self.logger.warning("ota test: dropping chunks", chunks=sorted(drop_chunks))
-        # Pacing is derived from the Mari schedule geometry and fleet size, but
-        # currently clamped to the device's single-buffer chunk rate (see
-        # ota.DEVICE_CHUNK_RATE_HZ). Schedule + utilization are env-overridable
-        # for the eventual flip once the firmware ring lands.
-        schedule = os.environ.get("SWARMIT_MARI_SCHEDULE", "medium")
-        utilization = float(
-            os.environ.get("SWARMIT_OTA_UTILIZATION", OTA_DOWNLINK_UTILIZATION)
+            self.logger.warning(
+                "ota test: dropping chunks", chunks=sorted(drop_chunks)
+            )
+        # Pacing comes from the link the gateway reports; the adapter owns that
+        # derivation because it owns everything radio-shaped.
+        geometry = self.interface.link_geometry()
+        if geometry is None:
+            self.logger.warning(
+                "ota pacing: gateway has not reported a schedule, "
+                "using the fallback",
+                schedule=LinkGeometry.fallback().schedule_name,
+            )
+        settings = derive_block_settings(
+            geometry,
+            len(devices),
+            self.settings.ota_utilization,
+            self.settings.ota_device_chunk_rate,
         )
-        device_rate = float(
-            os.environ.get("SWARMIT_OTA_DEVICE_RATE", DEVICE_CHUNK_RATE_HZ)
-        )
-        settings = settings_for_fleet(
-            schedule, len(devices), utilization, device_rate
-        )
-        # Experiment knob: override the report-collection window (ms). Too short
-        # and a report that lands after the broker round trip reads as "missing"
-        # -> a spurious repair round.
-        report_ms = os.environ.get("SWARMIT_OTA_REPORT_MS")
-        if report_ms:
-            settings.report_timeout = float(report_ms) / 1000.0
+        if self.settings.ota_report_timeout:
+            settings.report_timeout = self.settings.ota_report_timeout
         transfer = BlockTransfer(
             chunks=self.chunks,
             devices=list(devices),
@@ -1048,10 +1062,9 @@ class Controller:
         )
         self.logger.info(
             "ota transfer start",
-            path="block",
             image_bytes=data_size,
             total_chunks=len(self.chunks),
-            schedule=schedule,
+            schedule=(geometry or LinkGeometry.fallback()).schedule_name,
             block_size=settings.block_size,
             inter_chunk_ms=round(settings.inter_chunk_delay * 1000, 1),
             report_timeout_ms=round(settings.report_timeout * 1000, 1),
@@ -1077,7 +1090,6 @@ class Controller:
         failed = {a: r for a, r in results.items() if not r.success}
         self.logger.info(
             "ota transfer complete",
-            path="block",
             elapsed_s=round(elapsed, 2),
             chunk_sends=transfer.chunk_sends,
             delivered=delivered,

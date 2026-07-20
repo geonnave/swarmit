@@ -12,3 +12,14 @@ devices = ""
 # adapter = "edge"
 # serial_port = "/dev/ttyACM0"
 # baudrate = 1000000
+
+# OTA pacing. The flash transfer derives its send rate from the schedule the
+# gateway reports, so these rarely need touching.
+# Share of the downlink slots OTA may drive (the rest stays free for beacons,
+# joins and commands):
+# ota_utilization = 0.75
+# Per-bot chunk-write ceiling in chunks/s (SHA verify + flash write):
+# ota_device_chunk_rate = 84.0
+# Report-collection window in seconds; 0 derives it from the schedule. Raise it
+# if reports arrive late (a slow broker) and cause spurious repair rounds:
+# ota_report_timeout = 0
