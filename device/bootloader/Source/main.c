@@ -467,19 +467,12 @@ int main(void) {
                 ipc_shared_data.ota.received_mask |= bit;
                 mutex_unlock();
             }
-            ipc_shared_data.ota.last_chunk_acked = (int32_t)index;
+            ipc_shared_data.ota.last_chunk_seen = (int32_t)index;
 
-            // Per-chunk ack ONLY for the legacy per-chunk protocol. In block mode
-            // (version >= 2) the controller tracks delivery via block reports;
-            // an uplink ack per chunk would throttle the transfer to the node's
-            // single uplink cell per slotframe.
-            if (ipc_shared_data.ota.protocol_version < SWRMT_OTA_PROTOCOL_VERSION) {
-                size_t length = 0;
-                _bootloader_vars.notification_buffer[length++] = SWRMT_MSG_OTA_CHUNK_ACK;
-                memcpy(_bootloader_vars.notification_buffer + length, (void *)&index, sizeof(uint32_t));
-                length += sizeof(uint32_t);
-                mari_node_tx(_bootloader_vars.notification_buffer, length);
-            }
+            // No per-chunk ack. The controller tracks delivery with one block
+            // report per block instead. Each node owns a single uplink cell per
+            // slotframe, so acking every chunk would throttle the whole
+            // transfer down to that rate.
 
             // If last chunk, set back to ready state
             if (index == ipc_shared_data.ota.chunk_count - 1) {

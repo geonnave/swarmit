@@ -53,12 +53,11 @@ typedef struct __attribute__((packed)) {
     uint32_t chunk_count;
     uint32_t chunk_index;
     uint32_t chunk_size;
-    int32_t  last_chunk_acked;
-    uint32_t block_index;                                 ///< Current block being received (block OTA)
+    int32_t  last_chunk_seen;                             ///< Last chunk index the net core published (-1 = none)
+    uint32_t block_index;                                 ///< Current block being received
     uint32_t received_mask;                               ///< Bit i set: chunk block_index*W+i written to flash
     uint8_t  finalize_expected[SWRMT_OTA_SHA256_LENGTH];  ///< Expected whole-image SHA256 (FINALIZE)
     uint8_t  finalize_ok;                                 ///< FINALIZE result (1 = image SHA256 matched)
-    uint8_t  protocol_version;                            ///< OTA protocol version from OTA_START (>=2 => block, skip per-chunk ack)
     uint8_t chunk[INT8_MAX + 1];
 } ipc_ota_data_t;
 

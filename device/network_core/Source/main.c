@@ -57,12 +57,10 @@ typedef struct {
     bool        ipc_log_received;
     uint8_t     gpio_event_idx;
     crypto_sha256_ctx_t sha256_ctx;
-    uint8_t     expected_hash[SWRMT_OTA_SHA256_LENGTH];
     uint8_t     computed_hash[SWRMT_OTA_SHA256_LENGTH];
     uint64_t    device_id;
     uint16_t    mari_net_id;
     bool        mari_initialized;
-    int32_t     last_chunk_acked;
     uint32_t    metrics_rx_counter;
     uint32_t    metrics_tx_counter;
     bool        metrics_received;
@@ -306,18 +304,17 @@ int main(void) {
                     if (ipc_shared_data.status != SWRMT_APPLICATION_READY && ipc_shared_data.status != SWRMT_APPLICATION_PROGRAMMING) {
                         break;
                     }
-                    ipc_shared_data.ota.last_chunk_acked = -1;
+                    ipc_shared_data.ota.last_chunk_seen = -1;
                     ipc_shared_data.status = SWRMT_APPLICATION_PROGRAMMING;
                     const swrmt_ota_start_pkt_t *pkt = (const swrmt_ota_start_pkt_t *)req->data;
                     // Erase the corresponding flash pages.
                     mutex_lock();
                     ipc_shared_data.ota.image_size = pkt->image_size;
                     ipc_shared_data.ota.chunk_count = pkt->chunk_count;
-                    // Protocol version tells the bootloader block (>=2) vs legacy:
-                    // in block mode it must NOT send a per-chunk ack (that uplink
-                    // frame per chunk throttles the transfer to the uplink rate).
-                    ipc_shared_data.ota.protocol_version = pkt->version;
-                    // Reset the block-OTA bitmap state for the new image.
+                    // pkt->version is not stored: this bootloader only speaks the
+                    // block protocol. It still echoes SWRMT_OTA_PROTOCOL_VERSION in
+                    // its START_ACK, which is what the controller checks.
+                    // Reset the block bitmap state for the new image.
                     ipc_shared_data.ota.block_index = 0;
                     ipc_shared_data.ota.received_mask = 0;
                     ipc_shared_data.ota.finalize_ok = 0;
@@ -339,8 +336,15 @@ int main(void) {
                         break;
                     }
 
+                    // chunk_size comes off the radio and bounds two memcpy calls
+                    // (into the shared IPC buffer here, out of it in the
+                    // bootloader), so bound it before either one runs.
+                    if (pkt->chunk_size > SWRMT_OTA_CHUNK_SIZE) {
+                        break;
+                    }
+
                     // Only verify + publish if the chunk was not already handled.
-                    if (ipc_shared_data.ota.last_chunk_acked != (int32_t)index) {
+                    if (ipc_shared_data.ota.last_chunk_seen != (int32_t)index) {
                         // Verify the chunk SHA on the wire buffer (our own req
                         // buffer) BEFORE publishing it to the shared IPC buffer -
                         // no lock needed for the verify.

@@ -42,7 +42,7 @@ typedef enum {
     SWRMT_MSG_OTA_START = 0x84,
     SWRMT_MSG_OTA_CHUNK = 0x85,
     SWRMT_MSG_OTA_START_ACK = 0x86,
-    SWRMT_MSG_OTA_CHUNK_ACK = 0x87,
+    SWRMT_MSG_OTA_CHUNK_ACK = 0x87,          // retired with the per-chunk OTA path; id kept reserved
     SWRMT_MSG_GPIO_EVENT = 0x88,
     SWRMT_MSG_LOG_EVENT = 0x89,
     SWRMT_MSG_OTA_BLOCK_REPORT_REQ = 0x8A,   // host -> device: request received bitmap
