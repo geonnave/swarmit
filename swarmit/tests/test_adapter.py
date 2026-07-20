@@ -233,9 +233,7 @@ def test_derive_block_settings_without_a_reported_schedule():
 
 @patch("swarmit.testbed.adapter.MarilibSerialAdapter")
 def test_edge_adapter_reports_link_geometry(_):
-    adapter = MarilibEdgeAdapter(
-        port="p", baudrate=1, busy_wait_timeout=0.1
-    )
+    adapter = MarilibEdgeAdapter(port="p", baudrate=1, busy_wait_timeout=0.1)
     # Nothing reported yet.
     assert adapter.link_geometry() is None
     adapter.mari.gateway.info.schedule_id = SCHEDULE_HUGE

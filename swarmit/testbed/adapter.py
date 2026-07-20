@@ -74,7 +74,9 @@ class LinkGeometry:
     @classmethod
     def fallback(cls) -> "LinkGeometry":
         """Geometry to pace with when the gateway has not reported one."""
-        return replace(cls.from_schedule_id(FALLBACK_SCHEDULE_ID), reported=False)
+        return replace(
+            cls.from_schedule_id(FALLBACK_SCHEDULE_ID), reported=False
+        )
 
 
 def derive_block_settings(
@@ -97,7 +99,9 @@ def derive_block_settings(
     )
     # Every bot reports within one slotframe; give the collection window two,
     # plus a slotframe for each extra fleet-full of uplink cells.
-    report_slotframes = 2.0 + max(0, n_bots - 1) / max(1, geometry.uplink_cells)
+    report_slotframes = 2.0 + max(0, n_bots - 1) / max(
+        1, geometry.uplink_cells
+    )
     return BlockOTASettings(
         block_size=BLOCK_SIZE_DEFAULT,
         inter_chunk_delay=1.0 / inject_pps,
@@ -190,7 +194,9 @@ class MarilibEdgeAdapter(GatewayAdapterBase):
         self.mari.serial_interface.close()
 
     def link_geometry(self) -> LinkGeometry | None:
-        return LinkGeometry.from_schedule_id(self.mari.gateway.info.schedule_id)
+        return LinkGeometry.from_schedule_id(
+            self.mari.gateway.info.schedule_id
+        )
 
     def send_payload(self, destination: int, payload: Payload):
         self.mari.send_frame(

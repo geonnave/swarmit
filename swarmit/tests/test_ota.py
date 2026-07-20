@@ -34,7 +34,9 @@ class SimpleChunk:
     data: bytes
 
 
-def make_chunks(image: bytes, chunk_size: int = CHUNK_SIZE) -> list[SimpleChunk]:
+def make_chunks(
+    image: bytes, chunk_size: int = CHUNK_SIZE
+) -> list[SimpleChunk]:
     chunks = []
     for i in range(0, len(image), chunk_size):
         data = image[i : i + chunk_size]
@@ -101,9 +103,7 @@ class FakeTransport:
     def _targets(self, dest):
         if dest == BROADCAST_ADDRESS:
             return list(self.devices.items())
-        return [
-            (a, d) for a, d in self.devices.items() if int(a, 16) == dest
-        ]
+        return [(a, d) for a, d in self.devices.items() if int(a, 16) == dest]
 
     def send_payload(self, dest, payload):
         if isinstance(payload, PayloadOTAChunk):

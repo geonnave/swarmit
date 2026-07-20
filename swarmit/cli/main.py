@@ -546,7 +546,9 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
                     if n_blocks and per_device_acked:
                         # Blocks fully delivered to the slowest bot, so the
                         # indicator only advances once every bot has the block.
-                        done_blocks = min(per_device_acked.values()) // block_size
+                        done_blocks = (
+                            min(per_device_acked.values()) // block_size
+                        )
                         progress.set_postfix_str(
                             f"blk {min(done_blocks, n_blocks)}/{n_blocks}"
                         )

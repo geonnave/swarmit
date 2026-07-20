@@ -72,9 +72,7 @@ def _test_drop_chunks() -> set[int]:
     lives in the environment and not in the settings file.
     """
     raw = os.environ.get("SWARMIT_OTA_TEST_DROP", "")
-    return {
-        int(x) for x in raw.split(",") if x.strip().lstrip("-").isdigit()
-    }
+    return {int(x) for x in raw.split(",") if x.strip().lstrip("-").isdigit()}
 
 
 class StaleBootloaderError(Exception):
@@ -1117,7 +1115,10 @@ class Controller:
         # a sign the report path churned under load. Not a failure, but worth a
         # breadcrumb for tuning.
         for addr, result in results.items():
-            if result.success and result.confirmed_chunks < result.total_chunks:
+            if (
+                result.success
+                and result.confirmed_chunks < result.total_chunks
+            ):
                 self.logger.info(
                     "ota bitmap under-tracked",
                     addr=addr,

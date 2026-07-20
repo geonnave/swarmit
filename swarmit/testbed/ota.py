@@ -190,7 +190,9 @@ class BlockTransfer:
         # Straggler set (reversible: a bot rejoins when it reports again).
         self._straggler: set[str] = set()
         # Blocks each device never fully confirmed (for the unicast pass).
-        self._incomplete: dict[str, set[int]] = {addr: set() for addr in self.devices}
+        self._incomplete: dict[str, set[int]] = {
+            addr: set() for addr in self.devices
+        }
 
         # Transient per-block counters, reset in _reset_block_state.
         self._silent: dict[str, int] = {}
@@ -253,7 +255,9 @@ class BlockTransfer:
     # ------------------------------------------------------------------ #
     # RX-thread entry points (thread-safe).
     # ------------------------------------------------------------------ #
-    def on_report(self, addr: str, block_index: int, received_mask: int) -> None:
+    def on_report(
+        self, addr: str, block_index: int, received_mask: int
+    ) -> None:
         """Feed a BLOCK_REPORT_RESP into the current round (RX thread)."""
         with self._lock:
             self._round_reports[addr] = (block_index, received_mask)
@@ -450,9 +454,9 @@ class BlockTransfer:
                 if not blocks:
                     break
                 for block in blocks:
-                    missing = self.full_block_mask(block) & ~self.confirmed_mask(
-                        addr, block
-                    )
+                    missing = self.full_block_mask(
+                        block
+                    ) & ~self.confirmed_mask(addr, block)
                     with self._lock:
                         self._round_reports = {}
                     self._send_chunks(
@@ -476,7 +480,9 @@ class BlockTransfer:
         reported_block, mask = rep
         if reported_block == block:
             self._straggler.discard(addr)
-            self._apply_confirmed(addr, block, mask & self.full_block_mask(block))
+            self._apply_confirmed(
+                addr, block, mask & self.full_block_mask(block)
+            )
 
     def _finalize(self) -> None:
         """Ask each device to verify the whole image against its SHA256."""

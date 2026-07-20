@@ -498,9 +498,7 @@ register_parser(
     PayloadType.SWARMIT_OTA_BLOCK_REPORT_RESP, PayloadOTABlockReportResp
 )
 register_parser(PayloadType.SWARMIT_OTA_FINALIZE, PayloadOTAFinalize)
-register_parser(
-    PayloadType.SWARMIT_OTA_FINALIZE_RESP, PayloadOTAFinalizeResp
-)
+register_parser(PayloadType.SWARMIT_OTA_FINALIZE_RESP, PayloadOTAFinalizeResp)
 register_parser(PayloadType.SWARMIT_EVENT_LOG, PayloadEvent)
 register_parser(PayloadType.SWARMIT_MESSAGE, PayloadMessage)
 register_parser(PayloadType.SWARMIT_LH2_CALIBRATION, PayloadCalibrationData)

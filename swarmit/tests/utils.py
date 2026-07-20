@@ -200,8 +200,7 @@ class SwarmitNode(threading.Thread):
         elif payload_type == PayloadType.SWARMIT_OTA_FINALIZE:
             complete = (
                 len(self.received_chunks) == self.total_chunks
-                and self.ota_bytes_received
-                == self.ota_expected_bytes_received
+                and self.ota_bytes_received == self.ota_expected_bytes_received
             )
             ok = complete and not self.ota_should_fail
             self.send_packet(
