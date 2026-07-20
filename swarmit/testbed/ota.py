@@ -1,9 +1,8 @@
-"""Block-OTA transfer state machine (fast OTA, Phase 1).
+"""Block-OTA transfer state machine.
 
-The legacy OTA path in ``controller.py`` is a per-chunk stop-and-wait: it
-broadcasts one chunk, waits for every bot to ack it, then moves on. That idles
-the Mari link on a round trip per chunk. This module implements the block /
-bitmap-NACK path instead:
+This replaced a per-chunk stop-and-wait that broadcast one chunk, waited for
+every bot to ack it, then moved on - a round trip per chunk, with the link idle
+in between. Instead:
 
 1. Broadcast a whole block of chunks (``block_size`` of them) with no per-chunk
    ack.
@@ -37,35 +36,24 @@ from typing import Callable, Iterable, Protocol
 from dotbot_utils.protocol import Payload
 
 from swarmit.testbed.protocol import (
+    BROADCAST_ADDRESS,
     PayloadOTABlockReportReq,
     PayloadOTAChunk,
     PayloadOTAFinalize,
 )
 
-BROADCAST_ADDRESS = 0xFFFFFFFFFFFFFFFF
-
 # W = 32 is the largest block the uint32 report bitmap holds without a wire
 # change; a larger block means fewer report rounds (less per-block overhead).
 BLOCK_SIZE_DEFAULT = 32
-# Base settle time before collecting a block report (~one Mari slotframe): the
-# fixed part of the wait, on top of the time it takes the block to be delivered.
-REPORT_TIMEOUT_DEFAULT = 0.3
-# Observed per-chunk downlink delivery time. On the desk the gateway delivers
-# ~1 frame per Mari slotframe (~0.26 s/chunk), far below the 22-slots/slotframe
-# theoretical max. The report wait scales by chunks-sent x this, so we wait for a
-# block to actually drain before asking "what did you get?" instead of asking
-# after one slotframe (which made the bot report ~everything missing and
-# triggered a full, wasteful re-send into an already-full gateway queue).
-PER_CHUNK_DELIVERY_DEFAULT = 0.25
-# Upper bound on a single report wait.
-WAIT_CAP_DEFAULT = 12.0
-# Delay between chunk sends. This paces how fast we feed the gateway's ~32-deep
-# TX queue, which is SHARED with status frames and other bots' traffic - so we
-# must not blast a whole block into it. Since the report wait is delivery-aware
-# (below), this delay only moves time from "waiting" into "sending"; it does not
-# slow the transfer (which is drain-bound), it just keeps our queue footprint
-# shallow so other sources keep their slots. Tune from the file log if needed.
-INTER_CHUNK_DELAY_DEFAULT = 0.15
+# How long to collect block reports after a round's sends. Derived from the
+# link geometry by the adapter; this default only applies when a settings
+# object is built by hand (tests).
+REPORT_TIMEOUT_DEFAULT = 0.25
+# Delay between chunk sends, which is what paces the transfer: chunks are
+# injected at the rate the downlink can carry them, so the gateway's shared TX
+# queue stays shallow instead of being blasted a block at a time. Also derived
+# from the link geometry.
+INTER_CHUNK_DELAY_DEFAULT = 0.02
 # A bot that misses this many consecutive report rounds becomes a straggler.
 # Sized against ~90% uplink PDR: P(4 lost reports) = 0.01% per bot-block.
 SILENT_STRAGGLER_ROUNDS_DEFAULT = 4
@@ -88,14 +76,15 @@ def popcount(value: int) -> int:
 class BlockOTASettings:
     """Tunables for the block-OTA state machine.
 
-    Defaults are Mari-"huge"-grounded starting points; per the workspace rules
-    they need >=200-node validation before being declared tuned.
+    ``block_size``, ``inter_chunk_delay`` and ``report_timeout`` normally come
+    from ``adapter.derive_block_settings``, which sizes them against the link
+    the gateway reports. The straggler and round limits below are protocol
+    policy and are the same on any link; per the workspace rules they need
+    >=200-node validation before being called tuned.
     """
 
     block_size: int = BLOCK_SIZE_DEFAULT
     report_timeout: float = REPORT_TIMEOUT_DEFAULT
-    per_chunk_delivery: float = PER_CHUNK_DELIVERY_DEFAULT
-    wait_cap: float = WAIT_CAP_DEFAULT
     inter_chunk_delay: float = INTER_CHUNK_DELAY_DEFAULT
     silent_straggler_rounds: int = SILENT_STRAGGLER_ROUNDS_DEFAULT
     stall_straggler_rounds: int = STALL_STRAGGLER_ROUNDS_DEFAULT
@@ -261,30 +250,6 @@ class BlockTransfer:
         start = block * self._w
         return [start + bit for bit in range(self._w) if mask & (1 << bit)]
 
-    def report_wait(self, chunks_sent: int) -> float:
-        """How long to wait after a round's sends before collecting reports.
-
-        The block needs ``chunks_sent * per_chunk_delivery`` to drain the
-        downlink. The send loop already spent ``chunks_sent * inter_chunk_delay``
-        pacing those sends, during which chunks were draining, so we only wait
-        for the *residual* backlog plus the report-collection window. With
-        ``inter_chunk_delay >= per_chunk_delivery`` (fully paced) the residual is
-        zero and we wait just one report window; with no pacing it reduces to the
-        full drain time. Either way the total per-block time is the same
-        (drain-bound) - pacing only trades wait for send and keeps the gateway
-        queue shallow. A round that sent nothing (a silent-bot re-request) waits
-        just the report window.
-        """
-        if chunks_sent <= 0:
-            return self.settings.report_timeout
-        residual = chunks_sent * max(
-            0.0,
-            self.settings.per_chunk_delivery - self.settings.inter_chunk_delay,
-        )
-        return min(
-            self.settings.report_timeout + residual, self.settings.wait_cap
-        )
-
     # ------------------------------------------------------------------ #
     # RX-thread entry points (thread-safe).
     # ------------------------------------------------------------------ #
@@ -307,19 +272,8 @@ class BlockTransfer:
             self._transfer_block(block)
         self._recover_stragglers()
         self._finalize()
-        results = self._result()
-        # Waste ratio: chunk frames sent vs delivered. ~1.0 is ideal; a high
-        # ratio means the pacing is re-sending chunks the gateway had not yet
-        # drained (tune per_chunk_delivery up toward the real downlink period).
-        delivered = sum(r.confirmed_chunks for r in results.values())
-        if self._logger is not None and delivered:
-            self._logger.info(
-                "block ota done",
-                chunk_sends=self._chunk_sends,
-                delivered=delivered,
-                waste_ratio=round(self._chunk_sends / delivered, 2),
-            )
-        return results
+        # The caller logs the summary (it has the elapsed time to go with it).
+        return self._result()
 
     @property
     def chunk_sends(self) -> int:
@@ -378,7 +332,7 @@ class BlockTransfer:
             PayloadOTABlockReportReq(block_index=block, block_size=self._w),
         )
 
-    def _reset_block_state(self, block: int) -> None:
+    def _reset_block_state(self) -> None:
         self._round = 0
         self._reported = set()
         for addr in self.devices:
@@ -402,7 +356,7 @@ class BlockTransfer:
                     self._on_progress(addr, start + bit)
 
     def _transfer_block(self, block: int) -> None:
-        self._reset_block_state(block)
+        self._reset_block_state()
         needed = set(self.block_chunk_indices(block))
         while True:
             with self._lock:
@@ -414,7 +368,7 @@ class BlockTransfer:
                     self._send_chunks(needed, target)
                     sent_this_round += len(needed)
                 self._send_report_req(block, target)
-            self._sleep(self.report_wait(sent_this_round))
+            self._sleep(self.settings.report_timeout)
             self._evaluate_round(block)
             settled = self.block_settled(block)
             self._log(
@@ -525,18 +479,25 @@ class BlockTransfer:
             self._apply_confirmed(addr, block, mask & self.full_block_mask(block))
 
     def _finalize(self) -> None:
-        targets = list(self.devices)
+        """Ask each device to verify the whole image against its SHA256."""
         for _ in range(self.settings.finalize_max_rounds):
             pending = [
                 addr
-                for addr in targets
+                for addr in self.devices
                 if not self._finalize_inbox.get(addr, False)
             ]
             if not pending:
                 break
-            self._send_payload(
-                self._dest(None), PayloadOTAFinalize(sha=self.image_sha)
-            )
+            payload = PayloadOTAFinalize(sha=self.image_sha)
+            if self.broadcast and len(pending) == len(self.devices):
+                # Everyone still needs it: one frame instead of N.
+                self._send_payload(self._dest(None), payload)
+            else:
+                # Targeted transfer, or a retry for a subset. Asking the whole
+                # network would make untargeted bots hash their own (unrelated)
+                # flash and answer about it.
+                for addr in pending:
+                    self._send_payload(self._dest(addr), payload)
             self._sleep(self.settings.report_timeout)
 
     def _result(self) -> dict[str, DeviceResult]:

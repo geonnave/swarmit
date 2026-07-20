@@ -30,6 +30,7 @@ from swarmit.testbed.adapter import (
 from swarmit.testbed.logger import LOGGER
 from swarmit.testbed.ota import BLOCK_SIZE_DEFAULT, BlockTransfer
 from swarmit.testbed.protocol import (
+    BROADCAST_ADDRESS,
     OTA_PROTOCOL_VERSION_BLOCK,
     OTA_PROTOCOL_VERSION_LEGACY,
     DeviceType,
@@ -58,7 +59,6 @@ MONITOR_TIMEOUT = 60  # s
 OTA_MAX_RETRIES_DEFAULT = 10
 OTA_ACK_TIMEOUT_DEFAULT = 0.7
 SERIAL_PORT_DEFAULT = get_default_port()
-BROADCAST_ADDRESS = 0xFFFFFFFFFFFFFFFF
 VOLTAGE_MAX = 3000  # mV
 VOLTAGE_FULL = 2900  # mV
 VOLTAGE_WARNING = 1500  # mV

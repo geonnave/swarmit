@@ -96,6 +96,7 @@ class FakeTransport:
         self.report_loss = report_loss or (lambda addr, block: False)
         self.bt: BlockTransfer | None = None
         self.chunk_sends = 0
+        self.finalize_dests: list[int] = []
 
     def _targets(self, dest):
         if dest == BROADCAST_ADDRESS:
@@ -116,6 +117,7 @@ class FakeTransport:
                     block, mask = dev.report()
                     self.bt.on_report(addr, block, mask)
         elif isinstance(payload, PayloadOTAFinalize):
+            self.finalize_dests.append(dest)
             for addr, dev in self._targets(dest):
                 if self.report_loss(addr, -1):
                     continue
@@ -124,13 +126,21 @@ class FakeTransport:
                 )
 
 
-def build(devices, image, settings=None, chunk_loss=None, report_loss=None):
+def build(
+    devices,
+    image,
+    settings=None,
+    chunk_loss=None,
+    report_loss=None,
+    broadcast=True,
+    all_devices=None,
+):
     chunks = make_chunks(image)
     settings = settings or BlockOTASettings(
         block_size=4, inter_chunk_delay=0.0
     )
     transport = FakeTransport(
-        devices,
+        all_devices or devices,
         settings.block_size,
         len(chunks),
         chunk_loss=chunk_loss,
@@ -143,6 +153,7 @@ def build(devices, image, settings=None, chunk_loss=None, report_loss=None):
         send_payload=transport.send_payload,
         image_sha=hashlib.sha256(image).digest(),
         settings=settings,
+        broadcast=broadcast,
         sleep=lambda *_: None,
         on_progress=lambda a, i: progress.append((a, i)),
     )
@@ -162,32 +173,6 @@ def test_block_layout_and_masks():
     assert bt.full_block_mask(0) == 0b1111
     assert bt.full_block_mask(2) == 0b111  # only 3 chunks
     assert bt.indices_from_mask(1, 0b1010) == [5, 7]
-
-
-def test_report_wait_waits_for_residual_backlog():
-    # No pacing: wait covers the full drain of what was sent.
-    unpaced = BlockOTASettings(
-        block_size=4,
-        report_timeout=0.3,
-        per_chunk_delivery=0.25,
-        inter_chunk_delay=0.0,
-        wait_cap=12.0,
-    )
-    bt, *_ = build(["AABB"], make_image(CHUNK_SIZE), settings=unpaced)
-    assert bt.report_wait(0) == pytest.approx(0.3)  # nothing sent
-    assert bt.report_wait(4) == pytest.approx(0.3 + 4 * 0.25)  # full drain
-    assert bt.report_wait(1000) == pytest.approx(12.0)  # capped
-
-    # Fully paced (delay >= drain): the send already drained it, so we wait
-    # only the report window regardless of how many chunks were sent.
-    paced = BlockOTASettings(
-        block_size=4,
-        report_timeout=0.3,
-        per_chunk_delivery=0.25,
-        inter_chunk_delay=0.25,
-    )
-    bt2, *_ = build(["AABB"], make_image(CHUNK_SIZE), settings=paced)
-    assert bt2.report_wait(32) == pytest.approx(0.3)
 
 
 def test_repair_mask_unions_reporting_devices():
@@ -213,7 +198,7 @@ def test_silent_device_contributes_no_repair():
 def test_earlier_reported_block_means_needs_full_block():
     image = make_image(8 * CHUNK_SIZE)  # 2 blocks of 4
     bt, transport, _, _ = build(["AAAA"], image)
-    bt._reset_block_state(1)
+    bt._reset_block_state()
     # Device reports it is still on block 0 while we evaluate block 1.
     bt._round_reports = {"AAAA": (0, 0b1111)}
     bt._evaluate_round(1)
@@ -377,3 +362,32 @@ def test_unicast_straggler_recovery_succeeds():
     results = bt.run()
     assert results["AAAA"].success
     assert not results["AAAA"].straggler
+
+
+def test_finalize_broadcasts_when_every_device_is_pending():
+    image = make_image(8 * CHUNK_SIZE)
+    bt, transport, _, _ = build(["AAAA", "BBBB"], image)
+    results = bt.run()
+    assert all(r.success for r in results.values())
+    # One frame reaches both bots, so no per-device finalize is needed.
+    assert transport.finalize_dests == [BROADCAST_ADDRESS]
+
+
+def test_finalize_is_unicast_for_a_targeted_transfer():
+    """A targeted transfer must not ask the whole network to verify.
+
+    Broadcasting FINALIZE would make untargeted bots hash their own unrelated
+    flash and answer about it.
+    """
+    image = make_image(8 * CHUNK_SIZE)
+    bt, transport, _, _ = build(
+        ["AAAA"],
+        image,
+        broadcast=False,
+        all_devices=["AAAA", "BBBB"],
+    )
+    results = bt.run()
+    assert results["AAAA"].success
+    assert transport.finalize_dests == [int("AAAA", 16)]
+    # The bot that was not targeted was never written to or asked anything.
+    assert transport.devices["BBBB"].received == set()

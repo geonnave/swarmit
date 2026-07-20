@@ -66,10 +66,14 @@ class PayloadType(IntEnum):
     METRICS_PROBE = MariDefaultPayloadType.METRICS_PROBE
 
 
-# OTA protocol version reported by a bootloader in its OTA_START_ACK. Version 1
-# is the legacy per-chunk stop-and-wait path (no version byte on the wire, so it
-# parses as 1); version 2 is the block/bitmap-NACK path. The controller uses the
-# block path only with the subset of bots that report version >= 2.
+# Destination that reaches every node on the network.
+BROADCAST_ADDRESS = 0xFFFFFFFFFFFFFFFF
+
+
+# OTA protocol version a bootloader reports in its OTA_START_ACK. Version 1 is
+# the retired per-chunk stop-and-wait path: it sent no version byte, so an ack
+# from such a bootloader parses as 1. Version 2 is the block/bitmap path. A bot
+# that does not report 2 cannot be flashed over the air any more.
 OTA_PROTOCOL_VERSION_LEGACY = 1
 OTA_PROTOCOL_VERSION_BLOCK = 2
 
@@ -376,7 +380,12 @@ class PayloadOTAChunkAck(Payload):
 
 @dataclass
 class PayloadOTABlockReportReq(Payload):
-    """Host -> device: request a bot's received-chunk bitmap for one block."""
+    """Host -> device: request a bot's received-chunk bitmap for one block.
+
+    The device answers with the block it currently holds, not necessarily the
+    one asked about - the fields say which block prompted the request and how
+    wide it is, and a device on an older block is read as needing all of it.
+    """
 
     metadata: list[PayloadFieldMetadata] = dataclasses.field(
         default_factory=lambda: [

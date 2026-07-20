@@ -30,11 +30,7 @@ def _fast_ota_settings(*args, **kwargs) -> BlockOTASettings:
     stretch these transfers to tens of seconds. The mocked transport delivers
     instantly, so here pacing only costs wall clock.
     """
-    return BlockOTASettings(
-        inter_chunk_delay=0.0,
-        per_chunk_delivery=0.0,
-        report_timeout=0.02,
-    )
+    return BlockOTASettings(inter_chunk_delay=0.0, report_timeout=0.02)
 
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
