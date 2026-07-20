@@ -515,11 +515,6 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
                     )
                     n_blocks = ev.get("n_blocks", 0)
                     block_size = ev.get("block_size", 1) or 1
-                    algo = (
-                        "block OTA"
-                        if ev.get("path") == "block"
-                        else "per-chunk"
-                    )
                     progress = tqdm(
                         total=ev["total_chunks"] * len(ev["devices"]),
                         unit="chunk",
@@ -528,7 +523,7 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
                         ncols=100,
                     )
                     progress.set_description(
-                        f"Flashing {len(ev['devices'])} bot(s) · {algo}"
+                        f"Flashing {len(ev['devices'])} bot(s)"
                     )
                 elif etype == "chunk":
                     if progress is None:

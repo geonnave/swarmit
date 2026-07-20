@@ -39,7 +39,6 @@ from swarmit.testbed.protocol import (
     PayloadCalibrationData,
     PayloadLH2Capture,
     PayloadMessage,
-    PayloadOTAChunk,
     PayloadOTAStart,
     PayloadReset,
     PayloadStart,
@@ -65,6 +64,23 @@ BROADCAST_ADDRESS = 0xFFFFFFFFFFFFFFFF
 VOLTAGE_MAX = 3000  # mV
 VOLTAGE_FULL = 2900  # mV
 VOLTAGE_WARNING = 1500  # mV
+
+
+class StaleBootloaderError(Exception):
+    """Raised when a target bot's bootloader predates the block OTA protocol.
+
+    Such a bot only speaks the retired per-chunk protocol, so it cannot be
+    flashed over the air. Re-provision it over J-Link with
+    ``dotbot device flash-swarmit-sandbox``.
+    """
+
+    def __init__(self, devices):
+        self.devices = list(devices)
+        super().__init__(
+            f"{len(self.devices)} device(s) run a bootloader older than the "
+            f"block OTA protocol: {', '.join(self.devices)}. Re-provision "
+            "them with 'dotbot device flash-swarmit-sandbox'."
+        )
 
 
 @dataclass
@@ -589,23 +605,13 @@ class Controller:
                     device_addr, bool(packet.payload.ok)
                 )
         elif packet.payload_type == PayloadType.SWARMIT_OTA_CHUNK_ACK:
-            try:
-                acked = bool(
-                    self.transfer_data[device_addr]
-                    .chunks[packet.payload.index]
-                    .acked
-                )
-            except (IndexError, KeyError):
-                self.logger.debug(
-                    "Chunk index out of range",
-                    device_addr=device_addr,
-                    chunk_index=packet.payload.index,
-                )
-                return
-            if acked is False:
-                self.transfer_data[device_addr].chunks[
-                    packet.payload.index
-                ].acked = 1
+            # Retired with the per-chunk path. Only a bootloader older than
+            # this controller supports still sends these; parse and drop.
+            self.logger.debug(
+                "ignoring retired per-chunk ack",
+                device_addr=device_addr,
+                chunk_index=packet.payload.index,
+            )
         elif packet.payload_type == PayloadType.SWARMIT_EVENT_LOG:
             if (
                 self.settings.devices
@@ -925,104 +931,48 @@ class Controller:
             ),
         }
 
-    def send_chunk(
-        self,
-        chunk: DataChunk,
-        device_addr: str,
-        devices_to_flash: set[str],
-    ):
-        def is_chunk_acknowledged():
-            if int(device_addr, 16) == BROADCAST_ADDRESS:
-                return sorted(self.transfer_data.keys()) == sorted(
-                    devices_to_flash
-                ) and all(
-                    [
-                        status.chunks[chunk.index].acked
-                        for status in self.transfer_data.values()
-                    ]
-                )
-            else:
-                return (
-                    device_addr in self.transfer_data.keys()
-                    and self.transfer_data[device_addr]
-                    .chunks[chunk.index]
-                    .acked
-                )
-
-        payload = PayloadOTAChunk(
-            index=chunk.index,
-            count=chunk.size,
-            sha=chunk.sha,
-            chunk=chunk.data,
-        )
-        send_time = time.time()
-        send = True
-        retries_count = 0
-        while (
-            not is_chunk_acknowledged()
-            and retries_count <= self.settings.ota_max_retries
-        ):
-            if send is True:
-                self.send_payload(int(device_addr, 16), payload)
-                if self.settings.verbose:
-                    missing_acks = [
-                        addr
-                        for addr in devices_to_flash
-                        if addr not in self.transfer_data
-                        or not self.transfer_data[addr]
-                        .chunks[chunk.index]
-                        .acked
-                    ]
-                    print(
-                        f"Transferring chunk {chunk.index + 1}/{self.start_ota_data.chunks} to {device_addr} "
-                        f"- {retries_count} retries "
-                        f"- {len(missing_acks)} missing acks: {', '.join(missing_acks) if missing_acks else 'none'}"
-                    )
-                if int(device_addr, 16) == BROADCAST_ADDRESS:
-                    for addr in devices_to_flash:
-                        self.transfer_data[addr].chunks[
-                            chunk.index
-                        ].retries = retries_count
-                else:
-                    self.transfer_data[device_addr].chunks[
-                        chunk.index
-                    ].retries = retries_count
-                send_time = time.time()
-                retries_count += 1
-            time.sleep(0.001)
-            send = time.time() - send_time > self.settings.ota_timeout
-
     @property
     def ota_block_size(self) -> int:
-        """Chunks per block used by the block-OTA path."""
+        """Chunks per block used by the OTA transfer."""
         return BLOCK_SIZE_DEFAULT
 
-    def select_ota_path(self, devices) -> str:
-        """'block' if every target bot negotiated the block protocol, else 'legacy'."""
-        if not devices:
-            return "legacy"
-        return (
-            "block"
-            if all(
-                self._ota_versions.get(addr, OTA_PROTOCOL_VERSION_LEGACY)
-                >= OTA_PROTOCOL_VERSION_BLOCK
-                for addr in devices
-            )
-            else "legacy"
+    def stale_bootloaders(self, devices) -> list[str]:
+        """Devices whose OTA_START_ACK did not announce the block protocol.
+
+        Their bootloader predates the block/bitmap path and only understands
+        the retired per-chunk protocol. They cannot be flashed over the air by
+        this controller; they need a re-provision over J-Link.
+        """
+        return sorted(
+            addr
+            for addr in devices
+            if self._ota_versions.get(addr, OTA_PROTOCOL_VERSION_LEGACY)
+            < OTA_PROTOCOL_VERSION_BLOCK
         )
 
-    def _transfer_block_protocol(
+    def transfer(
         self,
         firmware,
         devices,
         show_progress: bool = True,
     ) -> dict[str, TransferDataStatus]:
-        """Transfer the image with the block / bitmap-NACK protocol.
+        """Transfer the firmware to the devices with the block/bitmap protocol.
 
-        Populates ``self.transfer_data`` (acked bits, success) exactly like the
-        legacy path so callers - the daemon stream, LocalSwarmitClient.flash -
-        keep working unchanged.
+        `show_progress` controls the built-in tqdm bar. Clients that render
+        their own progress (e.g. the daemon's /flash/stream or
+        LocalSwarmitClient.flash) pass False to avoid duplicate output.
+
+        Raises ``StaleBootloaderError`` if any target bot still runs a
+        pre-block bootloader, before a single chunk goes on the wire.
         """
+        stale = self.stale_bootloaders(devices)
+        if stale:
+            self.logger.error(
+                "ota aborted: stale bootloaders",
+                devices=stale,
+                required_version=OTA_PROTOCOL_VERSION_BLOCK,
+            )
+            raise StaleBootloaderError(stale)
         data_size = len(firmware)
         use_progress_bar = show_progress and not self.settings.verbose
         progress = None
@@ -1162,114 +1112,4 @@ class Controller:
                     confirmed=result.confirmed_chunks,
                     total=result.total_chunks,
                 )
-        return self.transfer_data
-
-    def transfer(
-        self,
-        firmware,
-        devices,
-        show_progress: bool = True,
-    ) -> dict[str, TransferDataStatus]:
-        """Transfer the firmware to the devices.
-
-        `show_progress` controls the built-in tqdm bar. Clients that
-        render their own progress (e.g. the daemon's /flash/stream or
-        LocalSwarmitClient.flash) pass False to avoid duplicate output.
-        """
-        # Use the block/bitmap path when every target bot negotiated it in its
-        # OTA_START_ACK; otherwise fall back to the legacy per-chunk path for
-        # the whole group. (Per-subset dual-path is a follow-up - see
-        # plans/swarmit-fast-ota/plan.html, Phase 2.)
-        versions = {
-            addr: self._ota_versions.get(addr, OTA_PROTOCOL_VERSION_LEGACY)
-            for addr in devices
-        }
-        use_block = self.select_ota_path(devices) == "block"
-        if use_block:
-            self.logger.info(
-                "ota path selected", path="block", versions=versions
-            )
-            return self._transfer_block_protocol(
-                firmware, devices, show_progress
-            )
-        self.logger.info(
-            "ota path selected", path="legacy", versions=versions
-        )
-
-        data_size = len(firmware)
-        self.logger.info(
-            "ota transfer start",
-            path="legacy",
-            image_bytes=data_size,
-            total_chunks=len(self.chunks),
-            devices=len(devices),
-        )
-        legacy_start_ts = time.time()
-        use_progress_bar = show_progress and not self.settings.verbose
-        if use_progress_bar:
-            progress = tqdm(
-                range(0, data_size),
-                unit="B",
-                unit_scale=False,
-                colour="green",
-                ncols=100,
-            )
-            progress.set_description(
-                f"Loading firmware ({int(data_size / 1024)}kB)"
-            )
-        self.transfer_data = {}
-        for _addr in devices:
-            self.transfer_data[_addr] = TransferDataStatus()
-            self.transfer_data[_addr].chunks = [
-                Chunk(index=f"{i:03d}", size=f"{self.chunks[i].size:03d}B")
-                for i in range(len(self.chunks))
-            ]
-        for chunk in self.chunks:
-            if not self.settings.devices:
-                self.send_chunk(
-                    chunk,
-                    addr_to_hex(BROADCAST_ADDRESS),
-                    devices,
-                )
-            else:
-                for _addr in devices:
-                    self.send_chunk(chunk, _addr, devices)
-            if use_progress_bar:
-                progress.update(chunk.size)
-        if self.settings.verbose:
-            retries_count = sum(
-                self.transfer_data[_addr].chunks[_chunk].retries
-                for _chunk in range(len(self.chunks))
-                for _addr in devices
-            )
-            if not self.settings.devices:
-                retries_count = int(retries_count / len(devices))
-            print(f"Transfer completed with {retries_count} retries")
-        if use_progress_bar:
-            progress.close()
-        for device in devices:
-            device_data = self.transfer_data.get(device)
-            if device_data:
-                device_data.success = all(
-                    chunk.acked for chunk in device_data.chunks
-                )
-                self.transfer_data[device] = device_data
-        legacy_elapsed = time.time() - legacy_start_ts
-        delivered = sum(
-            sum(1 for c in td.chunks if c.acked)
-            for td in self.transfer_data.values()
-        )
-        total_retries = sum(
-            c.retries for td in self.transfer_data.values() for c in td.chunks
-        )
-        self.logger.info(
-            "ota transfer complete",
-            path="legacy",
-            elapsed_s=round(legacy_elapsed, 2),
-            delivered=delivered,
-            retries=total_retries,
-            chunk_per_s=round(
-                delivered / legacy_elapsed if legacy_elapsed else 0, 2
-            ),
-        )
         return self.transfer_data

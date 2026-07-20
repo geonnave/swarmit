@@ -99,7 +99,18 @@ class LocalSwarmitClient:
             }
             return
 
-        path = self._controller.select_ota_path(start_data["acked"])
+        stale = self._controller.stale_bootloaders(start_data["acked"])
+        if stale:
+            yield {
+                "type": "error",
+                "message": (
+                    f"{len(stale)} device(s) run a bootloader older than the "
+                    f"block OTA protocol: {stale}. Re-provision them with "
+                    "'dotbot device flash-swarmit-sandbox'."
+                ),
+            }
+            return
+
         block_size = self._controller.ota_block_size
         total_chunks = len(self._controller.chunks)
         yield {
@@ -108,13 +119,8 @@ class LocalSwarmitClient:
             "total_chunks": total_chunks,
             "fw_hash": start_data["ota"].fw_hash.hex().upper(),
             "devices": sorted(start_data["acked"]),
-            "path": path,
             "block_size": block_size,
-            "n_blocks": (
-                (total_chunks + block_size - 1) // block_size
-                if path == "block"
-                else 0
-            ),
+            "n_blocks": (total_chunks + block_size - 1) // block_size,
         }
 
         # Run transfer in a thread; poll transfer_data while it runs.

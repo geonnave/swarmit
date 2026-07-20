@@ -311,7 +311,8 @@ async def flash_stream(payload: FlashRequest, request: Request):
     """OTA flash with progress streamed back as Server-Sent Events.
 
     Event types yielded in order:
-      - "flash_started":     {image_size, total_chunks, fw_hash, devices}
+      - "flash_started":     {image_size, total_chunks, fw_hash, devices,
+                              block_size, n_blocks}
       - "chunk" (repeated):  {addr, acked, total}   — cumulative acked count
       - "device_done" (per): {addr, success, retries}
       - "complete":          {all_success, elapsed_s}
@@ -370,13 +371,31 @@ async def flash_stream(payload: FlashRequest, request: Request):
             )
             return
 
+        stale = controller.stale_bootloaders(start_data["acked"])
+        if stale:
+            yield _sse(
+                {
+                    "type": "error",
+                    "message": (
+                        f"{len(stale)} device(s) run a bootloader older than "
+                        f"the block OTA protocol: {stale}. Re-provision them "
+                        "with 'dotbot device flash-swarmit-sandbox'."
+                    ),
+                }
+            )
+            return
+
+        block_size = controller.ota_block_size
+        total_chunks = len(controller.chunks)
         yield _sse(
             {
                 "type": "flash_started",
                 "image_size": len(fw),
-                "total_chunks": len(controller.chunks),
+                "total_chunks": total_chunks,
                 "fw_hash": start_data["ota"].fw_hash.hex().upper(),
                 "devices": sorted(start_data["acked"]),
+                "block_size": block_size,
+                "n_blocks": (total_chunks + block_size - 1) // block_size,
             }
         )
 

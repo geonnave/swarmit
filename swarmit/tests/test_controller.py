@@ -10,15 +10,31 @@ from swarmit.testbed.controller import (
     Controller,
     ControllerSettings,
     ResetLocation,
+    StaleBootloaderError,
 )
 from swarmit.testbed.logger import setup_logging
-from swarmit.testbed.protocol import StatusType
+from swarmit.testbed.ota import BlockOTASettings
+from swarmit.testbed.protocol import OTA_PROTOCOL_VERSION_LEGACY, StatusType
 from swarmit.tests.utils import (
-    ChunkAckStrategy,
+    ChunkLossStrategy,
     MarilibMQTTAdapterMock,
     MarilibSerialAdapterMock,
     SwarmitNode,
 )
+
+
+def _fast_ota_settings(*args, **kwargs) -> BlockOTASettings:
+    """Pacing stand-in for tests: no inter-chunk delay, short report window.
+
+    The real derivation paces sends at the radio's downlink rate, which would
+    stretch these transfers to tens of seconds. The mocked transport delivers
+    instantly, so here pacing only costs wall clock.
+    """
+    return BlockOTASettings(
+        inter_chunk_delay=0.0,
+        per_chunk_delivery=0.0,
+        report_timeout=0.02,
+    )
 
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
@@ -556,6 +572,7 @@ def test_controller_send_lh2_calibration_raw_format_rejected():
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
+@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
@@ -585,10 +602,11 @@ def test_controller_ota_broadcast():
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
+@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
-def test_controller_ota_broadcast_verbose(capsys):
+def test_controller_ota_broadcast_verbose():
     controller = Controller(
         ControllerSettings(adapter_wait_timeout=0.1, verbose=True)
     )
@@ -612,11 +630,11 @@ def test_controller_ota_broadcast_verbose(capsys):
     result = controller.transfer(firmware, ota_data["acked"])
     time.sleep(0.3)
     assert all([transfer.success for transfer in result.values()]) is True
-    assert "Transfer completed" in capsys.readouterr().out
 
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
+@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
@@ -644,29 +662,30 @@ def test_controller_ota_unicast():
     result = controller.transfer(firmware, ota_data["acked"])
     time.sleep(0.3)
     assert all([transfer.success for transfer in result.values()]) is True
+    # The untargeted bot was never written to.
+    assert nodes[1].received_chunks == set()
 
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
+@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
-def test_controller_ota_with_retries(capsys):
-    controller = Controller(
-        ControllerSettings(
-            adapter_wait_timeout=0.1, ota_max_retries=3, verbose=True
-        )
-    )
+def test_controller_ota_repairs_lost_chunks():
+    """A chunk lost on the downlink is repaired from the block report."""
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
     test_adapter = controller.interface.mari.serial_interface
+    # node1 misses chunk 5 twice, then accepts the repair broadcast.
     node1 = SwarmitNode(
         address=0x01,
-        ack_strategy=ChunkAckStrategy(ack_miss_index=5, ack_miss_retries=2),
+        loss_strategy=ChunkLossStrategy(drop_index=5, drop_count=2),
         adapter=test_adapter,
     )
+    # node2 never receives chunk 5, so its image stays incomplete.
     node2 = SwarmitNode(
         address=0x02,
-        ack_strategy=ChunkAckStrategy(ack_miss_index=5, ack_miss_retries=4),
-        ota_should_fail=True,
+        loss_strategy=ChunkLossStrategy(drop_index=5, drop_count=10_000),
         adapter=test_adapter,
     )
     nodes = [node1, node2]
@@ -677,36 +696,52 @@ def test_controller_ota_with_retries(capsys):
 
     ota_data = controller.start_ota(firmware)
     assert ota_data["acked"] == [f"{node.address:08X}" for node in nodes]
-    assert ota_data["missed"] == []
-
-    for node in nodes:
-        assert node.status == StatusType.Programming
 
     result = controller.transfer(firmware, ota_data["acked"])
-    assert "Transfer completed with" in capsys.readouterr().out
     assert result["00000001"].success is True
     assert result["00000002"].success is False
-    # retries are equal for both nodes (broadcast)
-    assert sum(chunk.retries for chunk in result["00000001"].chunks) == 3
-    assert sum(chunk.retries for chunk in result["00000002"].chunks) == 3
+    # The repair actually delivered the chunk rather than giving up on it.
+    assert 5 in node1.received_chunks
+    assert 5 not in node2.received_chunks
 
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
 @patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
+@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
-def test_controller_ota_index_out_range(capsys):
-    controller = Controller(
-        ControllerSettings(
-            adapter_wait_timeout=0.1, ota_max_retries=3, verbose=True
-        )
+def test_controller_ota_finalize_mismatch_fails():
+    """A complete delivery whose image SHA does not match is not a success."""
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(
+        address=0x01, ota_should_fail=True, adapter=test_adapter
     )
+    test_adapter.add_node(node)
+
+    firmware = b"\x00" * 2**16
+
+    ota_data = controller.start_ota(firmware)
+    result = controller.transfer(firmware, ota_data["acked"])
+    # Every chunk arrived, but the device rejected the whole-image hash.
+    assert len(node.received_chunks) == node.total_chunks
+    assert result["00000001"].success is False
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.OTA_ACK_TIMEOUT_DEFAULT", 0.1)
+@patch("swarmit.testbed.controller.settings_for_fleet", _fast_ota_settings)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_controller_ota_refuses_stale_bootloader():
+    """A bot that never announces the block protocol aborts the flash."""
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
     test_adapter = controller.interface.mari.serial_interface
     node = SwarmitNode(
         address=0x01,
-        ack_strategy=ChunkAckStrategy(ack_out_of_range_index=50),
-        ota_should_fail=True,
+        ota_protocol_version=OTA_PROTOCOL_VERSION_LEGACY,
         adapter=test_adapter,
     )
     test_adapter.add_node(node)
@@ -714,14 +749,15 @@ def test_controller_ota_index_out_range(capsys):
     firmware = b"\x00" * 2**16
 
     ota_data = controller.start_ota(firmware)
-    assert ota_data["acked"] == [f"{node.address:08X}"]
-    assert ota_data["missed"] == []
-    assert node.status == StatusType.Programming
+    assert ota_data["acked"] == ["00000001"]
+    assert controller.stale_bootloaders(ota_data["acked"]) == ["00000001"]
 
-    result = controller.transfer(firmware, ota_data["acked"])
-    assert "Transfer completed with" in capsys.readouterr().out
-    assert result["00000001"].success is False
-    assert sum(chunk.retries for chunk in result["00000001"].chunks) == 3
+    with pytest.raises(StaleBootloaderError) as exc:
+        controller.transfer(firmware, ota_data["acked"])
+    assert "00000001" in str(exc.value)
+    assert "flash-swarmit-sandbox" in str(exc.value)
+    # Aborted before any chunk went on the wire.
+    assert node.received_chunks == set()
 
 
 def test_controller_chunk_repr():
