@@ -15,6 +15,7 @@
 
 #include <nrf.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "protocol.h"
 
@@ -60,7 +61,9 @@ typedef struct __attribute__((packed)) {
     uint8_t data[INT8_MAX];
 } ipc_log_data_t;
 
-typedef struct __attribute__((packed)) {
+/// Shared memory only, never serialized: unpacked so the compiler keeps its
+/// size a multiple of 4 and the members after it stay word-aligned.
+typedef struct {
     uint32_t image_size;
     uint32_t chunk_count;
     uint32_t chunk_index;
@@ -113,6 +116,23 @@ typedef struct __attribute__((packed)) {
     ipc_lh2_calibration_t    lh2_calibration;     ///< LH2 calibration data
     ipc_crash_report_t      crash_report;       ///< Cause of the most recent reset
 } ipc_shared_data_t;
+
+// This layout must stay identical to the app core's copy in
+// device/bootloader/Source/ipc.h. ipc_shared_data_t is packed, so every
+// member's offset is the running sum of the ones before it, and the members
+// after `ota` hold 32-bit values the secure app core reads with word accesses
+// while SCB->CCR.UNALIGN_TRP is set. A member whose size is not a multiple of
+// 4 shifts them off alignment and those accesses take a HardFault there.
+_Static_assert(sizeof(ipc_ota_data_t) % 4 == 0,
+               "ipc_ota_data_t size must be a multiple of 4");
+_Static_assert(offsetof(ipc_shared_data_t, target_position) % 4 == 0,
+               "target_position must be 4-byte aligned");
+_Static_assert(offsetof(ipc_shared_data_t, current_position) % 4 == 0,
+               "current_position must be 4-byte aligned");
+_Static_assert(offsetof(ipc_shared_data_t, lh2_calibration) % 4 == 0,
+               "lh2_calibration must be 4-byte aligned");
+_Static_assert(offsetof(ipc_shared_data_t, crash_report) % 4 == 0,
+               "crash_report must be 4-byte aligned");
 
 /**
  * @brief Lock the mutex, blocks until the mutex is locked
