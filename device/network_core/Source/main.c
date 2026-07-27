@@ -92,8 +92,10 @@ static void _handle_packet(uint64_t dst_address, uint8_t *packet, uint8_t length
     uint8_t *ptr = _app_vars.req_buffer;
     uint8_t packet_type = (uint8_t)*ptr++;
 
-    if (length == sizeof(mr_metrics_payload_t) && packet_type == MARI_PAYLOAD_TYPE_METRICS_PROBE) {
-        _app_vars.metrics_received = true;
+    if (packet_type == MARI_PAYLOAD_TYPE_METRICS_PROBE) {
+        if (length >= sizeof(mr_metrics_payload_t)) {
+            _app_vars.metrics_received = true;
+        }
         return;
     }
 
