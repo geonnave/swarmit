@@ -16,6 +16,10 @@ from tqdm import tqdm
 
 from swarmit import __version__
 from swarmit.client import build_client
+from swarmit.testbed.adapter import (
+    DEVICE_CHUNK_RATE_HZ,
+    OTA_DOWNLINK_UTILIZATION,
+)
 from swarmit.testbed.controller import (
     CHUNK_SIZE,
     OTA_ACK_TIMEOUT_DEFAULT,
@@ -171,6 +175,11 @@ DEFAULTS = {
     # See https://crystalfree.atlassian.net/wiki/spaces/Mari/pages/3324903426/Registry+of+Mari+Network+IDs
     "swarmit_network_id": "1200",
     "mqtt_use_tls": False,
+    # OTA pacing. The transfer paces itself from the schedule the gateway
+    # reports; these scale that derivation. 0 means "derive it".
+    "ota_utilization": OTA_DOWNLINK_UTILIZATION,
+    "ota_device_chunk_rate": DEVICE_CHUNK_RATE_HZ,
+    "ota_report_timeout": 0,
     "verbose": False,
 }
 
@@ -344,6 +353,9 @@ def main(
         network_id=int(final_config["swarmit_network_id"], 16),
         adapter=final_config["adapter"],
         devices=[d for d in final_config["devices"].split(",") if d],
+        ota_utilization=float(final_config["ota_utilization"]),
+        ota_device_chunk_rate=float(final_config["ota_device_chunk_rate"]),
+        ota_report_timeout=float(final_config["ota_report_timeout"]),
         verbose=final_config["verbose"],
     )
 
@@ -500,6 +512,8 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
         progress = None
         per_device_acked: dict[str, int] = {}
         device_results: list[dict] = []
+        n_blocks = 0
+        block_size = 1
         try:
             for ev in events:
                 etype = ev.get("type")
@@ -511,6 +525,8 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
                         f"Radio chunks ([bold]{CHUNK_SIZE}B[/bold]): "
                         f"{ev['total_chunks']}"
                     )
+                    n_blocks = ev.get("n_blocks", 0)
+                    block_size = ev.get("block_size", 1) or 1
                     progress = tqdm(
                         total=ev["total_chunks"] * len(ev["devices"]),
                         unit="chunk",
@@ -527,6 +543,15 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
                     prev = per_device_acked.get(ev["addr"], 0)
                     progress.update(ev["acked"] - prev)
                     per_device_acked[ev["addr"]] = ev["acked"]
+                    if n_blocks and per_device_acked:
+                        # Blocks fully delivered to the slowest bot, so the
+                        # indicator only advances once every bot has the block.
+                        done_blocks = (
+                            min(per_device_acked.values()) // block_size
+                        )
+                        progress.set_postfix_str(
+                            f"blk {min(done_blocks, n_blocks)}/{n_blocks}"
+                        )
                 elif etype == "device_done":
                     device_results.append(ev)
                 elif etype == "complete":

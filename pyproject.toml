@@ -94,6 +94,9 @@ addopts = """
 testpaths = [
     "swarmit",
 ]
+markers = [
+    "transport_mock: exercises protocol logic against a mocked transport; does not count as hardware validation (no-mock rule)",
+]
 
 [tool.ruff]
 lint.select = ["E", "F"]

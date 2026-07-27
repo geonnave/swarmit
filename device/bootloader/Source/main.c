@@ -19,6 +19,7 @@
 #include "ipc.h"
 #include "nvmc.h"
 #include "protocol.h"
+#include "sha256.h"
 #include "mari.h"
 #include "tz.h"
 
@@ -51,10 +52,12 @@ extern volatile __attribute__((section(".shared_data"))) ipc_shared_data_t ipc_s
 
 typedef struct {
     uint8_t         notification_buffer[255]  __attribute__((aligned));
+    uint8_t         chunk_copy[SWRMT_OTA_CHUNK_SIZE];  ///< snapshot of the shared chunk, taken under mutex before the slow flash write
     uint32_t        base_addr;
     bool            ota_start_request;
     bool            ota_require_erase;
     bool            ota_chunk_request;
+    bool            ota_finalize_request;
     bool            lh2_calibration_ready;
     bool            lh2_capture_request;
     bool            lh2_capturing;
@@ -263,6 +266,7 @@ int main(void) {
                             1 << IPC_CHAN_RADIO_RX |
                             1 << IPC_CHAN_OTA_START |
                             1 << IPC_CHAN_OTA_CHUNK |
+                            1 << IPC_CHAN_OTA_FINALIZE |
                             1 << IPC_CHAN_APPLICATION_START |
                             1 << IPC_CHAN_SOC_RESET |
                             1 << IPC_CHAN_CALIBRATION_DATA |
@@ -276,6 +280,7 @@ int main(void) {
     NRF_IPC_S->RECEIVE_CNF[IPC_CHAN_SOC_RESET]          = 1 << IPC_CHAN_SOC_RESET;
     NRF_IPC_S->RECEIVE_CNF[IPC_CHAN_OTA_START]          = 1 << IPC_CHAN_OTA_START;
     NRF_IPC_S->RECEIVE_CNF[IPC_CHAN_OTA_CHUNK]          = 1 << IPC_CHAN_OTA_CHUNK;
+    NRF_IPC_S->RECEIVE_CNF[IPC_CHAN_OTA_FINALIZE]       = 1 << IPC_CHAN_OTA_FINALIZE;
     NRF_IPC_S->RECEIVE_CNF[IPC_CHAN_CALIBRATION_DATA]   = 1 << IPC_CHAN_CALIBRATION_DATA;
     NRF_IPC_S->RECEIVE_CNF[IPC_CHAN_LH2_CAPTURE]        = 1 << IPC_CHAN_LH2_CAPTURE;
     NVIC_EnableIRQ(IPC_IRQn);
@@ -422,35 +427,78 @@ int main(void) {
                 _bootloader_vars.ota_require_erase = false;
             }
 
-            // Notify erase is done
+            // Notify erase is done. Append the OTA protocol version so the
+            // controller knows this bootloader speaks the block/bitmap path.
             size_t length = 0;
             _bootloader_vars.notification_buffer[length++] = SWRMT_MSG_OTA_START_ACK;
+            _bootloader_vars.notification_buffer[length++] = SWRMT_OTA_PROTOCOL_VERSION;
             mari_node_tx(_bootloader_vars.notification_buffer, length);
         }
 
         if (_bootloader_vars.ota_chunk_request) {
             _bootloader_vars.ota_chunk_request = false;
 
-            if (ipc_shared_data.ota.last_chunk_acked != (int32_t)ipc_shared_data.ota.chunk_index) {
-                // Write chunk to flash
-                uint32_t addr = _bootloader_vars.base_addr + ipc_shared_data.ota.chunk_index * SWRMT_OTA_CHUNK_SIZE;
-                printf("Writing chunk %d/%d at address %p\n", ipc_shared_data.ota.chunk_index, ipc_shared_data.ota.chunk_count - 1, (uint32_t *)addr);
-                nvmc_write((uint32_t *)addr, (void *)ipc_shared_data.ota.chunk, ipc_shared_data.ota.chunk_size);
-                _bootloader_vars.ota_require_erase = true;
+            // Snapshot index/size and the chunk data under the mutex (so we never
+            // read a torn buffer while the net core publishes the next chunk),
+            // advance the block window, and dedup on the mask ("already in
+            // flash") - so a retransmit is never written twice (nWRITE=2 safety).
+            // Reset the mask on block change, not on chunk index 0, so a repair
+            // re-send of another bot's chunk 0 does not wipe an in-progress block.
+            mutex_lock();
+            uint32_t index = ipc_shared_data.ota.chunk_index;
+            uint32_t size  = ipc_shared_data.ota.chunk_size;
+            uint32_t blk   = index / SWRMT_OTA_BLOCK_SIZE;
+            uint32_t bit   = 1u << (index % SWRMT_OTA_BLOCK_SIZE);
+            if (blk != ipc_shared_data.ota.block_index) {
+                ipc_shared_data.ota.block_index = blk;
+                ipc_shared_data.ota.received_mask = 0;
             }
+            bool need_write = (ipc_shared_data.ota.received_mask & bit) == 0;
+            if (need_write) {
+                memcpy(_bootloader_vars.chunk_copy, (void *)ipc_shared_data.ota.chunk, size);
+            }
+            mutex_unlock();
 
-            // Notify chunk has been written
-            size_t length = 0;
-            _bootloader_vars.notification_buffer[length++] = SWRMT_MSG_OTA_CHUNK_ACK;
-            memcpy(_bootloader_vars.notification_buffer + length, (void *)&ipc_shared_data.ota.chunk_index, sizeof(uint32_t));
-            length += sizeof(uint32_t);
-            ipc_shared_data.ota.last_chunk_acked = ipc_shared_data.ota.chunk_index;
-            mari_node_tx(_bootloader_vars.notification_buffer, length);
+            if (need_write) {
+                uint32_t addr = _bootloader_vars.base_addr + index * SWRMT_OTA_CHUNK_SIZE;
+                nvmc_write((uint32_t *)addr, (void *)_bootloader_vars.chunk_copy, size);
+                _bootloader_vars.ota_require_erase = true;
+                mutex_lock();
+                ipc_shared_data.ota.received_mask |= bit;
+                mutex_unlock();
+            }
+            ipc_shared_data.ota.last_chunk_seen = (int32_t)index;
 
-            // If last chunk, finalize computed hash, set back to ready state
-            if (ipc_shared_data.ota.chunk_index == ipc_shared_data.ota.chunk_count - 1) {
+            // No per-chunk ack. The controller tracks delivery with one block
+            // report per block instead. Each node owns a single uplink cell per
+            // slotframe, so acking every chunk would throttle the whole
+            // transfer down to that rate.
+
+            // If last chunk, set back to ready state
+            if (index == ipc_shared_data.ota.chunk_count - 1) {
                 ipc_shared_data.status = SWRMT_APPLICATION_READY;
             }
+        }
+
+        if (_bootloader_vars.ota_finalize_request) {
+            _bootloader_vars.ota_finalize_request = false;
+            // Whole-image integrity check: hash the written flash and compare
+            // with the controller's expected SHA256. The app core is the only
+            // core that can read this flash, so the check runs here and the
+            // result is sent back directly (mirroring the chunk-ack TX path).
+            crypto_sha256_ctx_t ctx;
+            uint8_t             digest[SWRMT_OTA_SHA256_LENGTH];
+            crypto_sha256_init(&ctx);
+            crypto_sha256_update(&ctx, (const uint8_t *)_bootloader_vars.base_addr, ipc_shared_data.ota.image_size);
+            crypto_sha256(&ctx, digest);
+            uint8_t ok = (memcmp(digest, (const void *)ipc_shared_data.ota.finalize_expected, SWRMT_OTA_SHA256_LENGTH) == 0) ? 1 : 0;
+            ipc_shared_data.ota.finalize_ok = ok;
+            printf("OTA finalize: image SHA256 %s\n", ok ? "OK" : "MISMATCH");
+
+            size_t length = 0;
+            _bootloader_vars.notification_buffer[length++] = SWRMT_MSG_OTA_FINALIZE_RESP;
+            _bootloader_vars.notification_buffer[length++] = ok;
+            mari_node_tx(_bootloader_vars.notification_buffer, length);
         }
 
         if (_bootloader_vars.start_application) {
@@ -539,6 +587,11 @@ void IPC_IRQHandler(void) {
     if (NRF_IPC_S->EVENTS_RECEIVE[IPC_CHAN_OTA_CHUNK]) {
         NRF_IPC_S->EVENTS_RECEIVE[IPC_CHAN_OTA_CHUNK] = 0;
         _bootloader_vars.ota_chunk_request = true;
+    }
+
+    if (NRF_IPC_S->EVENTS_RECEIVE[IPC_CHAN_OTA_FINALIZE]) {
+        NRF_IPC_S->EVENTS_RECEIVE[IPC_CHAN_OTA_FINALIZE] = 0;
+        _bootloader_vars.ota_finalize_request = true;
     }
 
     if (NRF_IPC_S->EVENTS_RECEIVE[IPC_CHAN_APPLICATION_START]) {

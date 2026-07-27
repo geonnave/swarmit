@@ -9,8 +9,15 @@
 #define BROADCAST_ADDRESS 0xffffffffffffffffUL  ///< Broadcast address
 #define GATEWAY_ADDRESS   0x0000000000000000UL  ///< Gateway address
 
-#define SWRMT_OTA_CHUNK_SIZE        (64U)
+#define SWRMT_OTA_CHUNK_SIZE        (128U)
 #define SWRMT_OTA_SHA256_LENGTH     (32U)
+
+/// Block-OTA (fast OTA) parameters. W = 32 is the largest block the uint32_t
+/// received bitmap holds; bigger blocks mean fewer report rounds. Must match the
+/// controller's BLOCK_SIZE. The protocol version is echoed in OTA_START_ACK so
+/// the controller knows the bootloader speaks the block/bitmap path.
+#define SWRMT_OTA_BLOCK_SIZE        (32U)
+#define SWRMT_OTA_PROTOCOL_VERSION  (2U)
 
 typedef enum {
     SWRMT_DEVICE_TYPE_UNKNOWN = 0,
@@ -35,9 +42,13 @@ typedef enum {
     SWRMT_MSG_OTA_START = 0x84,
     SWRMT_MSG_OTA_CHUNK = 0x85,
     SWRMT_MSG_OTA_START_ACK = 0x86,
-    SWRMT_MSG_OTA_CHUNK_ACK = 0x87,
+    SWRMT_MSG_OTA_CHUNK_ACK = 0x87,          // retired with the per-chunk OTA path; id kept reserved
     SWRMT_MSG_GPIO_EVENT = 0x88,
     SWRMT_MSG_LOG_EVENT = 0x89,
+    SWRMT_MSG_OTA_BLOCK_REPORT_REQ = 0x8A,   // host -> device: request received bitmap
+    SWRMT_MSG_OTA_BLOCK_REPORT_RESP = 0x8B,  // device -> host: received bitmap for a block
+    SWRMT_MSG_OTA_FINALIZE = 0x8C,           // host -> device: verify whole-image SHA256
+    SWRMT_MSG_OTA_FINALIZE_RESP = 0x8D,      // device -> host: image SHA256 match result
     // FIXME: we need better namespacing for these messages, for example,
     // use 0x80 for SwarmIT application type, and then use an internal namespace for SwarmIT messages,
     // like 0x80.0x01 for SwarmIT status, 0x80.0x02 for SwarmIT start, etc.
@@ -80,6 +91,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint32_t image_size;                        ///< User image size in bytes
     uint32_t chunk_count;
+    uint8_t  version;                           ///< OTA protocol version (2 = block; absent/other = legacy)
 } swrmt_ota_start_pkt_t;
 
 typedef struct __attribute__((packed)) {
@@ -88,6 +100,25 @@ typedef struct __attribute__((packed)) {
     uint8_t  sha[8];
     uint8_t  chunk[SWRMT_OTA_CHUNK_SIZE];       ///< Bytes array of the firmware chunk
 } swrmt_ota_chunk_pkt_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t block_index;                       ///< Block the controller is asking about
+    uint8_t  block_size;                        ///< Chunks per block (W)
+} swrmt_ota_block_report_req_pkt_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t block_index;                       ///< Block the device currently holds
+    uint32_t received_mask;                     ///< Bit i set: chunk block_index*W+i written
+    uint8_t  status;                            ///< Reserved (0)
+} swrmt_ota_block_report_resp_pkt_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  sha[SWRMT_OTA_SHA256_LENGTH];      ///< Expected SHA256 of the whole image
+} swrmt_ota_finalize_pkt_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  ok;                                ///< 1 if the image SHA256 matched
+} swrmt_ota_finalize_resp_pkt_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t homography_count;              ///< number of homography matrices used for localization

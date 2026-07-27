@@ -14,10 +14,13 @@ from marilib.mari_protocol import (
 from marilib.model import EdgeEvent, NodeInfoCloud
 from marilib.protocol import PacketType
 
+from swarmit.testbed.ota import BLOCK_SIZE_DEFAULT
 from swarmit.testbed.protocol import (
+    OTA_PROTOCOL_VERSION_BLOCK,
     DeviceType,
     PayloadEvent,
-    PayloadOTAChunkAck,
+    PayloadOTABlockReportResp,
+    PayloadOTAFinalizeResp,
     PayloadOTAStartAck,
     PayloadStatus,
     PayloadType,
@@ -26,16 +29,14 @@ from swarmit.testbed.protocol import (
 
 
 @dataclasses.dataclass
-class ChunkAckStrategy:
-    """Strategy for acknowledging OTA chunks."""
+class ChunkLossStrategy:
+    """Simulated downlink loss for a node during a block OTA transfer."""
 
-    ack_miss_index: int | None = None  # Index of chunk to skip acknowledgment
-    ack_miss_retries: int = (
-        0  # Number of retries before acknowledging the missed chunk
-    )
-    ack_out_of_range_index: int | None = (
-        None  # Index of chunk to send invalid acknowledgment
-    )
+    # Chunk index the node pretends never to receive...
+    drop_index: int | None = None
+    # ...for this many transmissions, after which it accepts the chunk. A
+    # count larger than the transfer's repair budget makes the loss permanent.
+    drop_count: int = 0
 
 
 class LogEventTask(threading.Thread):
@@ -78,8 +79,9 @@ class SwarmitNode(threading.Thread):
         device_type: DeviceType = DeviceType.Unknown,
         battery: int = 2500,
         update_interval: float = 0.1,
-        ack_strategy: ChunkAckStrategy = ChunkAckStrategy(),
+        loss_strategy: ChunkLossStrategy = ChunkLossStrategy(),
         ota_should_fail: bool = False,
+        ota_protocol_version: int = OTA_PROTOCOL_VERSION_BLOCK,
     ):
         self.adapter = adapter
         self.address = address
@@ -87,15 +89,23 @@ class SwarmitNode(threading.Thread):
         self.status = status
         self.battery = battery
         self.update_interval = update_interval
-        self.ack_strategy = ack_strategy
+        self.loss_strategy = loss_strategy
+        # Makes the node answer FINALIZE with ok=0 even if it got every chunk,
+        # standing in for an image that does not match the expected SHA256.
         self.ota_should_fail = ota_should_fail
+        self.ota_protocol_version = ota_protocol_version
         self._stop_event = threading.Event()
         super().__init__(daemon=True)
         self.enabled = True
         self.total_chunks = 0
-        self.last_chunk_acked = -1
         self.ota_bytes_received = 0
         self.ota_expected_bytes_received = 0
+        # Block-OTA device state, mirroring the bootloader: a set of chunk
+        # indices written to "flash", plus the per-block bitmap it reports.
+        self.received_chunks: set[int] = set()
+        self.block_index = 0
+        self.received_mask = 0
+        self._drops_left = 0
         self.start()
         self.log_event_task = LogEventTask(
             self,
@@ -148,36 +158,54 @@ class SwarmitNode(threading.Thread):
             self.status = StatusType.Programming
             self.total_chunks = packet.payload.fw_chunk_count
             self.ota_expected_bytes_received = packet.payload.fw_length
-            self.send_packet(Packet().from_payload(PayloadOTAStartAck()))
-        elif payload_type == PayloadType.SWARMIT_OTA_CHUNK:
-            # ack miss simulation
-            if self.ack_strategy.ack_miss_index == packet.payload.index:
-                if self.ack_strategy.ack_miss_retries > 0:
-                    self.ack_strategy.ack_miss_retries -= 1
-                    return
-
-            # only log index if not already acknowledged
-            if self.last_chunk_acked != packet.payload.index:
-                self.last_chunk_acked = packet.payload.index
-                self.ota_bytes_received += packet.payload.count
-
-            index_to_ack = packet.payload.index
-            if (
-                self.ack_strategy.ack_out_of_range_index
-                == packet.payload.index
-            ):
-                index_to_ack = self.total_chunks + 1
-            self.send_packet(
-                Packet().from_payload(PayloadOTAChunkAck(index=index_to_ack))
+            self.received_chunks = set()
+            self.block_index = 0
+            self.received_mask = 0
+            self._drops_left = self.loss_strategy.drop_count
+            # A pre-block bootloader sends the ack with no version byte, which
+            # the controller reads as version 1 and refuses to flash.
+            ack = (
+                PayloadOTAStartAck(version=self.ota_protocol_version)
+                if self.ota_protocol_version >= OTA_PROTOCOL_VERSION_BLOCK
+                else PayloadOTAStartAck()
             )
-            if (
-                index_to_ack == self.total_chunks - 1
-                and not self.ota_should_fail
-            ):
-                assert (
-                    self.ota_bytes_received == self.ota_expected_bytes_received
-                )
+            self.send_packet(Packet().from_payload(ack))
+        elif payload_type == PayloadType.SWARMIT_OTA_CHUNK:
+            index = packet.payload.index
+            # Simulated downlink loss: swallow the chunk without recording it.
+            if self.loss_strategy.drop_index == index and self._drops_left > 0:
+                self._drops_left -= 1
+                return
+            # No per-chunk ack: just write it and set the bitmap bit, resetting
+            # the mask when the window moves on (as the bootloader does).
+            if index not in self.received_chunks:
+                self.received_chunks.add(index)
+                self.ota_bytes_received += packet.payload.count
+            block = index // BLOCK_SIZE_DEFAULT
+            if block != self.block_index:
+                self.block_index = block
+                self.received_mask = 0
+            self.received_mask |= 1 << (index % BLOCK_SIZE_DEFAULT)
+            if len(self.received_chunks) == self.total_chunks:
                 self.status = StatusType.Bootloader
+        elif payload_type == PayloadType.SWARMIT_OTA_BLOCK_REPORT_REQ:
+            self.send_packet(
+                Packet().from_payload(
+                    PayloadOTABlockReportResp(
+                        block_index=self.block_index,
+                        received_mask=self.received_mask,
+                    )
+                )
+            )
+        elif payload_type == PayloadType.SWARMIT_OTA_FINALIZE:
+            complete = (
+                len(self.received_chunks) == self.total_chunks
+                and self.ota_bytes_received == self.ota_expected_bytes_received
+            )
+            ok = complete and not self.ota_should_fail
+            self.send_packet(
+                Packet().from_payload(PayloadOTAFinalizeResp(ok=int(ok)))
+            )
 
     def send_packet(self, packet: Packet):
         self.adapter.handle_data_received(

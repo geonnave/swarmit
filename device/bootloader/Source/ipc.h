@@ -15,6 +15,7 @@
 
 #include <nrf.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "localization.h"
 #include "protocol.h"
@@ -40,6 +41,7 @@ typedef enum {
     IPC_CHAN_OTA_CHUNK          = 7,    ///< Channel used for writing a non secure image chunk
     IPC_CHAN_CALIBRATION_DATA   = 8,    ///< Channel used for sending calibration data
     IPC_CHAN_LH2_CAPTURE        = 9,    ///< Channel used to trigger a raw LH2 capture (READY mode only)
+    IPC_CHAN_OTA_FINALIZE       = 10,   ///< Channel used to verify the whole image SHA256 (block OTA)
 } ipc_channels_t;
 
 typedef struct __attribute__((packed)) {
@@ -47,12 +49,18 @@ typedef struct __attribute__((packed)) {
     uint8_t data[INT8_MAX];
 } ipc_log_data_t;
 
-typedef struct __attribute__((packed)) {
+/// Shared memory only, never serialized: unpacked so the compiler keeps its
+/// size a multiple of 4 and the members after it stay word-aligned.
+typedef struct {
     uint32_t image_size;
     uint32_t chunk_count;
     uint32_t chunk_index;
     uint32_t chunk_size;
-    int32_t  last_chunk_acked;
+    int32_t  last_chunk_seen;                             ///< Last chunk index the net core published (-1 = none)
+    uint32_t block_index;                                 ///< Current block being received
+    uint32_t received_mask;                               ///< Bit i set: chunk block_index*W+i written to flash
+    uint8_t  finalize_expected[SWRMT_OTA_SHA256_LENGTH];  ///< Expected whole-image SHA256 (FINALIZE)
+    uint8_t  finalize_ok;                                 ///< FINALIZE result (1 = image SHA256 matched)
     uint8_t chunk[INT8_MAX + 1];
 } ipc_ota_data_t;
 
@@ -98,6 +106,24 @@ typedef struct __attribute__((packed,aligned(8))) {
     ipc_lh2_calibration_t  lh2_calibration;     ///< LH2 calibration data
     ipc_crash_report_t      crash_report;       ///< Cause of the most recent reset
 } ipc_shared_data_t;
+
+// ipc_shared_data_t is packed, so every member's offset is the running sum of
+// the ones before it. The members after `ota` hold 32-bit values that the
+// secure core reads and writes with word accesses while SCB->CCR.UNALIGN_TRP
+// is set, so a member whose size is not a multiple of 4 shifts them off
+// alignment and those accesses take a HardFault instead of faulting loudly at
+// the point of the mistake. Assert the alignment here so a size change is
+// caught at compile time.
+_Static_assert(sizeof(ipc_ota_data_t) % 4 == 0,
+               "ipc_ota_data_t size must be a multiple of 4");
+_Static_assert(offsetof(ipc_shared_data_t, target_position) % 4 == 0,
+               "target_position must be 4-byte aligned");
+_Static_assert(offsetof(ipc_shared_data_t, current_position) % 4 == 0,
+               "current_position must be 4-byte aligned");
+_Static_assert(offsetof(ipc_shared_data_t, lh2_calibration) % 4 == 0,
+               "lh2_calibration must be 4-byte aligned");
+_Static_assert(offsetof(ipc_shared_data_t, crash_report) % 4 == 0,
+               "crash_report must be 4-byte aligned");
 
 void mutex_lock(void);
 

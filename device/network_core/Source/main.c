@@ -57,12 +57,10 @@ typedef struct {
     bool        ipc_log_received;
     uint8_t     gpio_event_idx;
     crypto_sha256_ctx_t sha256_ctx;
-    uint8_t     expected_hash[SWRMT_OTA_SHA256_LENGTH];
     uint8_t     computed_hash[SWRMT_OTA_SHA256_LENGTH];
     uint64_t    device_id;
     uint16_t    mari_net_id;
     bool        mari_initialized;
-    int32_t     last_chunk_acked;
     uint32_t    metrics_rx_counter;
     uint32_t    metrics_tx_counter;
     bool        metrics_received;
@@ -94,12 +92,15 @@ static void _handle_packet(uint64_t dst_address, uint8_t *packet, uint8_t length
     uint8_t *ptr = _app_vars.req_buffer;
     uint8_t packet_type = (uint8_t)*ptr++;
 
-    if (length == sizeof(mr_metrics_payload_t) && packet_type == MARI_PAYLOAD_TYPE_METRICS_PROBE) {
-        _app_vars.metrics_received = true;
+    if (packet_type == MARI_PAYLOAD_TYPE_METRICS_PROBE) {
+        if (length >= sizeof(mr_metrics_payload_t)) {
+            _app_vars.metrics_received = true;
+        }
         return;
     }
 
-    if (((packet_type >= SWRMT_MSG_STATUS) && (packet_type <= SWRMT_MSG_OTA_CHUNK)) || (packet_type == SWRMT_MSG_LH2_CALIBRATION) || (packet_type == SWRMT_MSG_LH2_CAPTURE)) {
+    if (((packet_type >= SWRMT_MSG_STATUS) && (packet_type <= SWRMT_MSG_OTA_CHUNK)) || (packet_type == SWRMT_MSG_LH2_CALIBRATION) || (packet_type == SWRMT_MSG_LH2_CAPTURE) ||
+        (packet_type == SWRMT_MSG_OTA_BLOCK_REPORT_REQ) || (packet_type == SWRMT_MSG_OTA_FINALIZE)) {
         _app_vars.req_received = true;
         return;
     }
@@ -226,6 +227,7 @@ int main(void) {
     NRF_IPC_NS->SEND_CNF[IPC_CHAN_SOC_RESET]         = 1 << IPC_CHAN_SOC_RESET;
     NRF_IPC_NS->SEND_CNF[IPC_CHAN_OTA_START]         = 1 << IPC_CHAN_OTA_START;
     NRF_IPC_NS->SEND_CNF[IPC_CHAN_OTA_CHUNK]         = 1 << IPC_CHAN_OTA_CHUNK;
+    NRF_IPC_NS->SEND_CNF[IPC_CHAN_OTA_FINALIZE]      = 1 << IPC_CHAN_OTA_FINALIZE;
     NRF_IPC_NS->SEND_CNF[IPC_CHAN_CALIBRATION_DATA]  = 1 << IPC_CHAN_CALIBRATION_DATA;
     NRF_IPC_NS->SEND_CNF[IPC_CHAN_LH2_CAPTURE]       = 1 << IPC_CHAN_LH2_CAPTURE;
     NRF_IPC_NS->RECEIVE_CNF[IPC_CHAN_REQ]            = 1 << IPC_CHAN_REQ;
@@ -304,13 +306,20 @@ int main(void) {
                     if (ipc_shared_data.status != SWRMT_APPLICATION_READY && ipc_shared_data.status != SWRMT_APPLICATION_PROGRAMMING) {
                         break;
                     }
-                    ipc_shared_data.ota.last_chunk_acked = -1;
+                    ipc_shared_data.ota.last_chunk_seen = -1;
                     ipc_shared_data.status = SWRMT_APPLICATION_PROGRAMMING;
                     const swrmt_ota_start_pkt_t *pkt = (const swrmt_ota_start_pkt_t *)req->data;
                     // Erase the corresponding flash pages.
                     mutex_lock();
                     ipc_shared_data.ota.image_size = pkt->image_size;
                     ipc_shared_data.ota.chunk_count = pkt->chunk_count;
+                    // pkt->version is not stored: this bootloader only speaks the
+                    // block protocol. It still echoes SWRMT_OTA_PROTOCOL_VERSION in
+                    // its START_ACK, which is what the controller checks.
+                    // Reset the block bitmap state for the new image.
+                    ipc_shared_data.ota.block_index = 0;
+                    ipc_shared_data.ota.received_mask = 0;
+                    ipc_shared_data.ota.finalize_ok = 0;
                     mutex_unlock();
                     printf("OTA Start request received (size: %u, chunks: %u)\n", ipc_shared_data.ota.image_size, ipc_shared_data.ota.chunk_count);
                     NRF_IPC_NS->TASKS_SEND[IPC_CHAN_OTA_START] = 1;
@@ -322,40 +331,83 @@ int main(void) {
                     }
 
                     const swrmt_ota_chunk_pkt_t *pkt = (const swrmt_ota_chunk_pkt_t *)req->data;
-                    ipc_shared_data.ota.chunk_index = pkt->index;
+                    uint32_t index = pkt->index;
 
                     // Check chunk index is valid
-                    if (ipc_shared_data.ota.chunk_index >= ipc_shared_data.ota.chunk_count) {
-                        printf("Invalid chunk index %u\n", ipc_shared_data.ota.chunk_index);
+                    if (index >= ipc_shared_data.ota.chunk_count) {
                         break;
                     }
 
-                    // Only check for matching sha if chunk was not already acked
-                    if (ipc_shared_data.ota.last_chunk_acked != (int32_t)ipc_shared_data.ota.chunk_index) {
-                        printf("Verify SHA for chunk %u: ", ipc_shared_data.ota.chunk_index);
-                        ipc_shared_data.ota.chunk_size = pkt->chunk_size;
-                        mutex_lock();
-                        memcpy((uint8_t *)ipc_shared_data.ota.chunk, pkt->chunk, pkt->chunk_size);
-                        mutex_unlock();
+                    // chunk_size comes off the radio and bounds two memcpy calls
+                    // (into the shared IPC buffer here, out of it in the
+                    // bootloader), so bound it before either one runs.
+                    if (pkt->chunk_size > SWRMT_OTA_CHUNK_SIZE) {
+                        break;
+                    }
 
-                        // Copy expected hash
-                        memcpy(_app_vars.expected_hash, pkt->sha, SWRMT_OTA_SHA256_LENGTH);
-
-                        // Compute and compare the chunk hash with the received one
+                    // Only verify + publish if the chunk was not already handled.
+                    if (ipc_shared_data.ota.last_chunk_seen != (int32_t)index) {
+                        // Verify the chunk SHA on the wire buffer (our own req
+                        // buffer) BEFORE publishing it to the shared IPC buffer -
+                        // no lock needed for the verify.
                         crypto_sha256_init(&_app_vars.sha256_ctx);
-                        mutex_lock();
-                        crypto_sha256_update(&_app_vars.sha256_ctx, (const uint8_t *)ipc_shared_data.ota.chunk, ipc_shared_data.ota.chunk_size);
-                        mutex_unlock();
+                        crypto_sha256_update(&_app_vars.sha256_ctx, (const uint8_t *)pkt->chunk, pkt->chunk_size);
                         crypto_sha256(&_app_vars.sha256_ctx, _app_vars.computed_hash);
-
-                        if (memcmp(_app_vars.computed_hash, _app_vars.expected_hash, 8) != 0) {
-                            puts("Failed");
+                        if (memcmp(_app_vars.computed_hash, pkt->sha, 8) != 0) {
                             break;
                         }
-                        puts("OK");
+                        // Publish index + size + data together under the mutex so
+                        // the bootloader can never read a torn chunk.
+                        mutex_lock();
+                        ipc_shared_data.ota.chunk_index = index;
+                        ipc_shared_data.ota.chunk_size = pkt->chunk_size;
+                        memcpy((uint8_t *)ipc_shared_data.ota.chunk, pkt->chunk, pkt->chunk_size);
+                        mutex_unlock();
+                    } else {
+                        // Duplicate of the last chunk: republish the index so the
+                        // bootloader can re-set the mask bit (idempotent).
+                        mutex_lock();
+                        ipc_shared_data.ota.chunk_index = index;
+                        mutex_unlock();
                     }
-                    printf("Process OTA chunk request (index: %u, size: %u)\n", ipc_shared_data.ota.chunk_index, ipc_shared_data.ota.chunk_size);
                     NRF_IPC_NS->TASKS_SEND[IPC_CHAN_OTA_CHUNK] = 1;
+                } break;
+                case SWRMT_MSG_OTA_BLOCK_REPORT_REQ:
+                {
+                    // Reply with the received-chunk bitmap for the block this
+                    // bot currently holds. The bootloader owns the bitmap (it
+                    // sets bits as it writes flash); the net core just reads the
+                    // shared copy and answers in the bot's own uplink slot, no
+                    // IPC round trip. A bot that has not started the requested
+                    // block reports an earlier block_index, which the controller
+                    // reads as "needs the whole block".
+                    size_t length = 0;
+                    _app_vars.notification_buffer[length++] = SWRMT_MSG_OTA_BLOCK_REPORT_RESP;
+                    mutex_lock();
+                    uint32_t block_index = ipc_shared_data.ota.block_index;
+                    uint32_t received_mask = ipc_shared_data.ota.received_mask;
+                    mutex_unlock();
+                    memcpy(&_app_vars.notification_buffer[length], &block_index, sizeof(uint32_t));
+                    length += sizeof(uint32_t);
+                    memcpy(&_app_vars.notification_buffer[length], &received_mask, sizeof(uint32_t));
+                    length += sizeof(uint32_t);
+                    _app_vars.notification_buffer[length++] = 0;  // status (reserved)
+                    mari_node_tx_payload(_app_vars.notification_buffer, length, &SWARMIT_TX_DEFAULT);
+                } break;
+                case SWRMT_MSG_OTA_FINALIZE:
+                {
+                    if (ipc_shared_data.status != SWRMT_APPLICATION_PROGRAMMING && ipc_shared_data.status != SWRMT_APPLICATION_READY) {
+                        break;
+                    }
+                    // Hand the expected whole-image SHA256 to the app core; it
+                    // reads back its own flash, compares, and sends the
+                    // FINALIZE_RESP itself (it owns the flash and the mari TX
+                    // shim, mirroring the chunk-ack path).
+                    const swrmt_ota_finalize_pkt_t *pkt = (const swrmt_ota_finalize_pkt_t *)req->data;
+                    mutex_lock();
+                    memcpy((uint8_t *)ipc_shared_data.ota.finalize_expected, pkt->sha, SWRMT_OTA_SHA256_LENGTH);
+                    mutex_unlock();
+                    NRF_IPC_NS->TASKS_SEND[IPC_CHAN_OTA_FINALIZE] = 1;
                 } break;
                 case SWRMT_MSG_LH2_CALIBRATION:
                 {
