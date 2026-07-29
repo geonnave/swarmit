@@ -18,6 +18,7 @@
 #include "protocol.h"
 #include "rng.h"
 #include "sha256.h"
+#include "version.h"
 #include "mr_gpio.h"
 
 // Mira includes

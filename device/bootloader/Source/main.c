@@ -22,6 +22,7 @@
 #include "sha256.h"
 #include "mari.h"
 #include "tz.h"
+#include "version.h"
 
 // DotBot-firmware includes
 #include "board_config.h"
@@ -30,6 +31,11 @@
 #include "timer.h"
 
 #include "../System/crash_latch.h"
+
+// The version string is reported over the air in a fixed 32-byte field, so a
+// tag that does not fit must fail the build rather than truncate on the wire.
+_Static_assert(sizeof(SWRMT_FW_VERSION) > 1, "SWRMT_FW_VERSION is empty");
+_Static_assert(sizeof(SWRMT_FW_VERSION) <= 32, "SWRMT_FW_VERSION exceeds the 32-byte wire field");
 
 #define SWARMIT_BASE_ADDRESS            (0x10000)
 #define SWARMIT_CONFIG_START_ADDRESS    (0x0103f800) // start of the last page (2KB) of the flash (0x01000000 + 0x00040000 - 0x800)
