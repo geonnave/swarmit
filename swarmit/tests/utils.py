@@ -16,8 +16,10 @@ from marilib.protocol import PacketType
 
 from swarmit.testbed.ota import BLOCK_SIZE_DEFAULT
 from swarmit.testbed.protocol import (
+    IMAGE_DIGEST_LEN,
     OTA_PROTOCOL_VERSION_BLOCK,
     DeviceType,
+    PayloadDeviceInfo,
     PayloadEvent,
     PayloadOTABlockReportResp,
     PayloadOTAFinalizeResp,
@@ -25,7 +27,13 @@ from swarmit.testbed.protocol import (
     PayloadStatus,
     PayloadType,
     StatusType,
+    encode_string_field,
 )
+
+
+def _decode_label(raw) -> str:
+    """NUL-padded wire field -> str, the way the firmware reads it."""
+    return bytes(raw).split(b"\x00", 1)[0].decode("utf-8", errors="replace")
 
 
 @dataclasses.dataclass
@@ -82,6 +90,10 @@ class SwarmitNode(threading.Thread):
         loss_strategy: ChunkLossStrategy = ChunkLossStrategy(),
         ota_should_fail: bool = False,
         ota_protocol_version: int = OTA_PROTOCOL_VERSION_BLOCK,
+        info_gen: int = 1,
+        image_name: str = "",
+        image_version: str = "",
+        answers_device_info: bool = True,
     ):
         self.adapter = adapter
         self.address = address
@@ -94,6 +106,23 @@ class SwarmitNode(threading.Thread):
         # standing in for an image that does not match the expected SHA256.
         self.ota_should_fail = ota_should_fail
         self.ota_protocol_version = ota_protocol_version
+        # Device-info state. `info_gen` is what the real net core echoes from
+        # shared memory; bumping it is the only thing that makes the
+        # controller ask again. `answers_device_info=False` stands in for
+        # firmware predating the message, which reports generation 0 and
+        # never replies.
+        self.info_gen = info_gen
+        self.image_name = image_name
+        self.image_version = image_version
+        self.answers_device_info = answers_device_info
+        # Staged by OTA_START, promoted to the reported image only once
+        # FINALIZE verifies - so a failed transfer never renames the image.
+        self._pending_name = ""
+        self._pending_version = ""
+        self.boot_count = info_gen
+        # Requests answered, so a test can assert the fetch happened exactly
+        # once per change rather than once per status frame.
+        self.device_info_requests = 0
         self._stop_event = threading.Event()
         super().__init__(daemon=True)
         self.enabled = True
@@ -122,6 +151,7 @@ class SwarmitNode(threading.Thread):
                         battery=self.battery,
                         pos_x=2500,
                         pos_y=2500,
+                        info_gen=self.info_gen,
                     ),
                 )
                 self.send_packet(packet)
@@ -162,6 +192,10 @@ class SwarmitNode(threading.Thread):
             self.block_index = 0
             self.received_mask = 0
             self._drops_left = self.loss_strategy.drop_count
+            self._pending_name = _decode_label(packet.payload.image_name)
+            self._pending_version = _decode_label(
+                packet.payload.image_version
+            )
             # A pre-block bootloader sends the ack with no version byte, which
             # the controller reads as version 1 and refuses to flash.
             ack = (
@@ -205,6 +239,37 @@ class SwarmitNode(threading.Thread):
             ok = complete and not self.ota_should_fail
             self.send_packet(
                 Packet().from_payload(PayloadOTAFinalizeResp(ok=int(ok)))
+            )
+            if ok:
+                # The device record is only rewritten once the whole-image
+                # SHA256 matches, and the generation counter moves with it.
+                self.image_name = self._pending_name
+                self.image_version = self._pending_version
+                self.info_gen = (self.info_gen + 1) % 256
+        elif payload_type == PayloadType.SWARMIT_REQUEST_MESSAGE:
+            if not self.answers_device_info:
+                return
+            if packet.payload.msg_id != PayloadType.SWARMIT_DEVICE_INFO_RESP:
+                return
+            self.device_info_requests += 1
+            self.send_packet(
+                Packet().from_payload(
+                    PayloadDeviceInfo(
+                        info_version=1,
+                        info_gen=self.info_gen,
+                        boot_count=self.boot_count,
+                        uptime_s=42,
+                        boot_reason=1,
+                        bl_version=encode_string_field("0.9.0-test"),
+                        net_version=encode_string_field("0.9.0-test"),
+                        image_size=self.ota_expected_bytes_received,
+                        image_digest=bytes(
+                            [self.address & 0xFF] * IMAGE_DIGEST_LEN
+                        ),
+                        image_name=encode_string_field(self.image_name),
+                        image_version=encode_string_field(self.image_version),
+                    )
+                )
             )
 
     def send_packet(self, packet: Packet):

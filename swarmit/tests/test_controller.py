@@ -6,6 +6,7 @@ import pytest
 from marilib.model import GatewayInfo, MariGateway
 
 from swarmit.testbed.controller import (
+    DEVICE_INFO_MAX_ATTEMPTS,
     Chunk,
     Controller,
     ControllerSettings,
@@ -762,3 +763,121 @@ def test_controller_chunk_repr():
         repr(chunk)
         == "{'index': 42, 'size': 128, 'acked': True, 'retries': 2}"
     )
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_REFRESH_INTERVAL", 0.05)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_device_info_fetched_once_per_change():
+    """The generation counter is what bounds device-info traffic.
+
+    A bot is read once when first seen and then never again until its
+    generation moves, no matter how many status frames arrive in between.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(
+        address=0x01,
+        adapter=test_adapter,
+        info_gen=3,
+        image_name="lakers-sandbox.bin",
+        image_version="0.9.0",
+    )
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+    assert controller.status_data[addr] is not None
+
+    # First read lands on its own, with no explicit request from the caller.
+    deadline = time.time() + 3
+    while time.time() < deadline and not controller.status_data[addr].info:
+        time.sleep(0.01)
+    info = controller.status_data[addr].info
+    assert info is not None
+    assert info.info_gen == 3
+    assert info.image_name == "lakers-sandbox.bin"
+    assert info.image_version == "0.9.0"
+    assert info.image_label == "lakers-sandbox.bin"
+
+    # Many more status frames go by; none of them costs a device-info round.
+    asked_once = node.device_info_requests
+    assert asked_once >= 1
+    time.sleep(0.8)
+    assert node.device_info_requests == asked_once
+    assert controller.stale_device_info() == []
+
+    # The bot reboots: the counter moves and exactly one more read follows.
+    node.info_gen = 4
+    node.boot_count = 4
+    deadline = time.time() + 3
+    while (
+        time.time() < deadline
+        and controller.status_data[addr].info.info_gen != 4
+    ):
+        time.sleep(0.01)
+    assert controller.status_data[addr].info.info_gen == 4
+    assert controller.status_data[addr].info.boot_count == 4
+    assert node.device_info_requests == asked_once + 1
+
+    node.stop()
+    controller.terminate()
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_REFRESH_INTERVAL", 0.02)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_device_info_gives_up_on_silent_firmware():
+    """Firmware predating the message must not be asked forever.
+
+    It reports generation 0 and never replies, so without a cap the
+    controller would put a broadcast on the downlink every refresh interval
+    for the life of the session.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(
+        address=0x02,
+        adapter=test_adapter,
+        info_gen=0,
+        answers_device_info=False,
+    )
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    # Drive the sweep directly rather than waiting on the cleanup thread's
+    # 1 Hz tick: what is under test is the attempt cap, not the scheduling.
+    assert controller.stale_device_info() == [addr]
+    for _ in range(DEVICE_INFO_MAX_ATTEMPTS):
+        controller._info_last_broadcast = 0.0
+        controller._refresh_stale_device_info()
+
+    assert controller.stale_device_info() == []
+    assert controller.status_data[addr].info is None
+    assert node.device_info_requests == 0
+
+    # A change on the bot re-opens the question, so a re-flashed device is
+    # not written off forever by a verdict reached before it was reflashed.
+    node.info_gen = 9
+    deadline = time.time() + 3
+    while (
+        time.time() < deadline
+        and controller.status_data[addr].info_gen != 9
+    ):
+        time.sleep(0.01)
+    assert controller.stale_device_info() == [addr]
+
+    node.stop()
+    controller.terminate()

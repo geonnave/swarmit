@@ -214,6 +214,9 @@ class FlashRequest(BaseModel):
     # Per-flash overrides. None = use the daemon's controller defaults.
     ota_timeout: Optional[float] = None
     ota_max_retries: Optional[int] = None
+    # Display-only labels stored with the image and reported back by the bot.
+    image_name: str = ""
+    image_version: str = ""
 
 
 class MessageRequest(BaseModel):
@@ -279,10 +282,12 @@ async def flash_firmware(payload: FlashRequest, request: Request):
 
     async with controller_lock:
 
-        start_data = (
-            await run_in_threadpool(controller.start_ota, fw, devices)
-            if devices
-            else await run_in_threadpool(controller.start_ota, fw)
+        start_data = await run_in_threadpool(
+            controller.start_ota,
+            fw,
+            devices if devices else None,
+            payload.image_name,
+            payload.image_version,
         )
 
         if start_data["missed"]:
@@ -350,10 +355,12 @@ async def flash_stream(payload: FlashRequest, request: Request):
 
     async def _do_flash(controller, fw, devices):
         try:
-            start_data = (
-                await run_in_threadpool(controller.start_ota, fw, devices)
-                if devices
-                else await run_in_threadpool(controller.start_ota, fw)
+            start_data = await run_in_threadpool(
+                controller.start_ota,
+                fw,
+                devices if devices else None,
+                payload.image_name,
+                payload.image_version,
             )
         except Exception as exc:
             yield _sse({"type": "error", "message": f"start_ota: {exc}"})

@@ -31,14 +31,20 @@ from swarmit.testbed.logger import LOGGER
 from swarmit.testbed.ota import BLOCK_SIZE_DEFAULT, BlockTransfer
 from swarmit.testbed.protocol import (
     BROADCAST_ADDRESS,
+    LH2_FLAG_FROM_FLASH,
+    LH2_FLAG_VALID,
     OTA_PROTOCOL_VERSION_BLOCK,
     OTA_PROTOCOL_VERSION_LEGACY,
+    BootReason,
     DeviceType,
     FaultType,
+    ImageResult,
+    ImageState,
     PayloadCalibrationData,
     PayloadLH2Capture,
     PayloadMessage,
     PayloadOTAStart,
+    PayloadRequestMessage,
     PayloadReset,
     PayloadStart,
     PayloadStop,
@@ -47,6 +53,7 @@ from swarmit.testbed.protocol import (
     decode_cfsr,
     decode_reset_reason,
     decode_sfsr,
+    decode_string_field,
 )
 
 CHUNK_SIZE = 128
@@ -58,6 +65,15 @@ STATUS_TIMEOUT = 2
 MONITOR_TIMEOUT = 60  # s
 OTA_MAX_RETRIES_DEFAULT = 10
 OTA_ACK_TIMEOUT_DEFAULT = 0.7
+# Shortest gap between two device-info broadcasts. One broadcast serves every
+# stale bot at once - each answers in its own uplink cell - so this is a
+# refresh rate for the whole fleet, not per device.
+DEVICE_INFO_REFRESH_INTERVAL = 2.0  # s
+# How many broadcasts a bot may ignore before it is written off as firmware
+# that does not implement the message.
+DEVICE_INFO_MAX_ATTEMPTS = 3
+# How long `info` waits for replies when it asks explicitly.
+DEVICE_INFO_TIMEOUT = 1.5  # s
 SERIAL_PORT_DEFAULT = get_default_port()
 VOLTAGE_MAX = 3000  # mV
 VOLTAGE_FULL = 2900  # mV
@@ -93,6 +109,99 @@ class StaleBootloaderError(Exception):
 
 
 @dataclass
+class DeviceInfo:
+    """What a bot reports it is running, decoded for display.
+
+    Fetched once and cached; refreshed only when the status frame's
+    generation counter stops matching `info_gen`.
+    """
+
+    info_version: int = 0
+    info_gen: int = 0
+    boot_count: int = 0
+    uptime_s: int = 0
+    boot_reason: int = 0
+    bl_version: str = ""
+    net_version: str = ""
+    image_state: int = 0
+    image_result: int = 0
+    image_size: int = 0
+    image_digest: str = ""  # hex, first 8 bytes of the image SHA256
+    image_name: str = ""
+    image_version: str = ""
+    lh2_homography_count: int = 0
+    lh2_flags: int = 0
+
+    @classmethod
+    def from_payload(cls, payload) -> "DeviceInfo":
+        return cls(
+            info_version=payload.info_version,
+            info_gen=payload.info_gen,
+            boot_count=payload.boot_count,
+            uptime_s=payload.uptime_s,
+            boot_reason=payload.boot_reason,
+            bl_version=decode_string_field(payload.bl_version),
+            net_version=decode_string_field(payload.net_version),
+            image_state=payload.image_state,
+            image_result=payload.image_result,
+            image_size=payload.image_size,
+            image_digest=bytes(payload.image_digest).hex(),
+            image_name=decode_string_field(payload.image_name),
+            image_version=decode_string_field(payload.image_version),
+            lh2_homography_count=payload.lh2_homography_count,
+            lh2_flags=payload.lh2_flags,
+        )
+
+    @property
+    def image_label(self) -> str:
+        """How to name this image in a table.
+
+        The digest is the identity; the name is decoration that a bot flashed
+        by an older controller simply does not have. Falling back to the
+        digest keeps the column meaningful either way.
+        """
+        return self.image_name or self.image_digest[:16] or "-"
+
+    @property
+    def boot_reason_name(self) -> str:
+        try:
+            return BootReason(self.boot_reason).name
+        except ValueError:
+            return f"reason{self.boot_reason}"
+
+    @property
+    def image_state_name(self) -> str:
+        try:
+            return ImageState(self.image_state).name
+        except ValueError:
+            return f"state{self.image_state}"
+
+    @property
+    def image_result_name(self) -> str:
+        try:
+            return ImageResult(self.image_result).name
+        except ValueError:
+            return f"result{self.image_result}"
+
+    @property
+    def lh2_summary(self) -> str:
+        if not self.lh2_homography_count:
+            return "uncalibrated"
+        noun = (
+            "homography"
+            if self.lh2_homography_count == 1
+            else "homographies"
+        )
+        flags = []
+        if self.lh2_flags & LH2_FLAG_VALID:
+            flags.append("valid")
+        if self.lh2_flags & LH2_FLAG_FROM_FLASH:
+            flags.append("from flash")
+        suffix = f" ({', '.join(flags)})" if flags else ""
+        return f"{self.lh2_homography_count} {noun}{suffix}"
+
+
+@dataclass
 class NodeStatus:
     """Class that holds node status."""
 
@@ -110,6 +219,10 @@ class NodeStatus:
     lr: int = 0
     raw: str = ""  # hex of the full status packet as received
     last_updated_at: float = 0
+    # Generation counter as of the most recent status frame. When it differs
+    # from `info.info_gen` the cached block is stale and gets refetched.
+    info_gen: int = 0
+    info: DeviceInfo | None = None
 
 
 @dataclass
@@ -450,6 +563,16 @@ class Controller:
         # Active block transfer, so RX-thread report/finalize frames can be fed
         # into it. None outside a block-OTA transfer.
         self._block_transfer: BlockTransfer | None = None
+        # Device-info cache, keyed by address. `_info_attempts` bounds how
+        # often a bot that never answers is asked again: firmware predating
+        # this message reports generation 0 forever, and without a cap that
+        # would put a broadcast on the downlink every refresh interval for the
+        # life of the session. The counter resets whenever a bot's generation
+        # actually moves, so a re-flashed bot is probed afresh.
+        self._device_info: dict[str, DeviceInfo] = {}
+        self._info_attempts: dict[str, int] = {}
+        self._info_gen_seen: dict[str, int] = {}
+        self._info_last_broadcast: float = 0.0
         self._known_devices: dict[str, StatusType] = {}
         self._log_event_listeners: list = []
         self._log_listeners_lock = threading.Lock()
@@ -541,6 +664,7 @@ class Controller:
     def _cleanup_loop(self):
         while not self._stop_event.is_set():
             self.cleanup_inactive(INACTIVE_TIMEOUT)
+            self._refresh_stale_device_info()
             time.sleep(1)
 
     def cleanup_inactive(self, timeout):
@@ -552,6 +676,100 @@ class Controller:
         ]
         for addr in inactive:
             del self.status_data[addr]
+            self._device_info.pop(addr, None)
+            self._info_attempts.pop(addr, None)
+            self._info_gen_seen.pop(addr, None)
+
+    def stale_device_info(self) -> list[str]:
+        """Devices whose cached device info no longer matches their status.
+
+        A bot is stale when it has never answered, or when the generation
+        counter in its status frame has moved past the one its last reply
+        carried. Bots that have ignored the request often enough to look like
+        older firmware are excluded.
+        """
+        stale = []
+        for addr, status in list(self.status_data.items()):
+            cached = self._device_info.get(addr)
+            if cached is not None and cached.info_gen == status.info_gen:
+                continue
+            if (
+                self._info_attempts.get(addr, 0)
+                >= DEVICE_INFO_MAX_ATTEMPTS
+            ):
+                continue
+            stale.append(addr)
+        return stale
+
+    def _refresh_stale_device_info(self):
+        """Ask the fleet for device info, but only when something changed.
+
+        This is the whole point of the generation counter: in steady state
+        nothing is stale and not a single packet goes out. A flash campaign or
+        a reboot moves the counter and costs exactly one broadcast, which every
+        stale bot answers in its own uplink cell.
+        """
+        stale = self.stale_device_info()
+        if not stale:
+            return
+        now = time.time()
+        if now - self._info_last_broadcast < DEVICE_INFO_REFRESH_INTERVAL:
+            return
+        self._info_last_broadcast = now
+        for addr in stale:
+            self._info_attempts[addr] = self._info_attempts.get(addr, 0) + 1
+        try:
+            self.request_device_info()
+        except Exception:
+            # The refresh runs on the cleanup thread; a transport hiccup here
+            # must not take that thread down with it.
+            self.logger.debug("device info refresh failed", exc_info=True)
+
+    def request_device_info(self, devices=None):
+        """Ask devices to emit their device-info block once.
+
+        Broadcast by default: bots reply in their own uplink cells, so one
+        request reaches the whole fleet for the cost of a single downlink
+        packet.
+        """
+        payload = PayloadRequestMessage(
+            msg_id=PayloadType.SWARMIT_DEVICE_INFO_RESP
+        )
+        if not devices:
+            self.send_payload(BROADCAST_ADDRESS, payload)
+            return
+        for addr in devices:
+            self.send_payload(int(addr, 16), payload)
+
+    def fetch_device_info(
+        self, devices=None, timeout=DEVICE_INFO_TIMEOUT
+    ) -> dict[str, DeviceInfo]:
+        """Request device info and wait for the replies to land.
+
+        Used by the `info` command, which asks explicitly rather than waiting
+        for the background refresh. Returns whatever arrived; a device that
+        never answers is simply absent.
+        """
+        wanted = set(devices) if devices else set(self.status_data)
+        # An explicit ask re-probes even a bot the background refresh has
+        # written off, so a operator running `info` after re-flashing gets an
+        # answer rather than the previous verdict.
+        for addr in wanted:
+            self._info_attempts.pop(addr, None)
+        self.request_device_info(devices)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            # Waiting on "cached at all" would return immediately with the
+            # entry from before the change; wait for the generation counters
+            # to line up instead.
+            if not wanted & set(self.stale_device_info()):
+                break
+            time.sleep(0.01)
+        return {
+            addr: info
+            for addr, info in self._device_info.items()
+            if addr in wanted
+        }
 
     def terminate(self):
         """Terminate the controller."""
@@ -600,8 +818,23 @@ class Controller:
                 lr=packet.payload.lr,
                 raw=packet.to_bytes().hex(),
                 last_updated_at=now,
+                info_gen=packet.payload.info_gen,
+                # Carried over rather than refetched: the block only changes
+                # when the generation counter says it did.
+                info=self._device_info.get(device_addr),
             )
+            if self._info_gen_seen.get(device_addr) != status.info_gen:
+                self._info_gen_seen[device_addr] = status.info_gen
+                # Something changed on this bot, so it is worth asking again
+                # even if it previously ignored us.
+                self._info_attempts.pop(device_addr, None)
             self.status_data.update({device_addr: status})
+        elif packet.payload_type == PayloadType.SWARMIT_DEVICE_INFO_RESP:
+            info = DeviceInfo.from_payload(packet.payload)
+            self._device_info[device_addr] = info
+            self._info_attempts.pop(device_addr, None)
+            if device_addr in self.status_data:
+                self.status_data[device_addr].info = info
         elif packet.payload_type == PayloadType.SWARMIT_OTA_START_ACK:
             # A bootloader speaking the block protocol appends its version; a
             # legacy one sends the empty ack, which parses as version 1.
@@ -858,7 +1091,12 @@ class Controller:
         self.send_payload(int(device_addr, 16), PayloadLH2Capture())
 
     def _send_start_ota(
-        self, device_addr: str, devices_to_flash: set[str], firmware: bytes
+        self,
+        device_addr: str,
+        devices_to_flash: set[str],
+        firmware: bytes,
+        image_name: str = "",
+        image_version: str = "",
     ):
         def is_start_ota_acknowledged():
             if int(device_addr, 16) == BROADCAST_ADDRESS:
@@ -871,6 +1109,8 @@ class Controller:
         payload = PayloadOTAStart(
             fw_length=len(firmware),
             fw_chunk_count=len(self.chunks),
+            image_name=image_name,
+            image_version=image_version,
         )
         send_time = time.time()
         send = True
@@ -885,8 +1125,20 @@ class Controller:
             time.sleep(0.001)
             send = time.time() - send_time > self.settings.ota_timeout
 
-    def start_ota(self, firmware, devices=None) -> dict:
-        """Start the OTA process."""
+    def start_ota(
+        self,
+        firmware,
+        devices=None,
+        image_name: str = "",
+        image_version: str = "",
+    ) -> dict:
+        """Start the OTA process.
+
+        `image_name` and `image_version` are display-only labels the device
+        stores alongside the image and reports back. They are never the basis
+        of a decision - the digest is the identity - so leaving them empty
+        costs only readability.
+        """
         if devices is None:
             devices = self.settings.devices or []
         # Pad the image to a 4-byte boundary: the device writes flash a 32-bit
@@ -934,12 +1186,18 @@ class Controller:
         if not devices:
             print("Broadcast start ota notification...")
             self._send_start_ota(
-                addr_to_hex(BROADCAST_ADDRESS), devices_to_flash, firmware
+                addr_to_hex(BROADCAST_ADDRESS),
+                devices_to_flash,
+                firmware,
+                image_name,
+                image_version,
             )
         else:
             for addr in devices:
                 print(f"Sending start ota notification to {addr}...")
-                self._send_start_ota(addr, devices, firmware)
+                self._send_start_ota(
+                    addr, devices, firmware, image_name, image_version
+                )
                 time.sleep(0.2)
         return {
             "ota": self.start_ota_data,

@@ -8,7 +8,7 @@ from typing import Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from swarmit.testbed.controller import NodeStatus, ResetLocation
+from swarmit.testbed.controller import DeviceInfo, NodeStatus, ResetLocation
 from swarmit.testbed.protocol import DeviceType, StatusType
 
 
@@ -149,6 +149,8 @@ class HTTPSwarmitClient:
         devices: list[str] | None = None,
         ota_timeout: float | None = None,
         ota_max_retries: int | None = None,
+        image_name: str = "",
+        image_version: str = "",
     ) -> Iterator[dict]:
         """POST /flash/stream and yield SSE events.
 
@@ -164,6 +166,8 @@ class HTTPSwarmitClient:
                 "devices": devices,
                 "ota_timeout": ota_timeout,
                 "ota_max_retries": ota_max_retries,
+                "image_name": image_name,
+                "image_version": image_version,
             }
         ).encode("utf-8")
         req = Request(
@@ -252,6 +256,7 @@ class HTTPSwarmitClient:
 
 def _parse_node_status(d: dict) -> NodeStatus:
     """JSON dict from /status → NodeStatus dataclass."""
+    info = d.get("info")
     return NodeStatus(
         device=DeviceType[d["device"]],
         status=StatusType[d["status"]],
@@ -267,4 +272,8 @@ def _parse_node_status(d: dict) -> NodeStatus:
         lr=d.get("lr", 0),
         raw=d.get("raw", ""),
         last_updated_at=d["last_updated_at"],
+        info_gen=d.get("info_gen", 0),
+        # A daemon predating device info sends no "info" key at all, and a
+        # bot that has not answered yet leaves it null.
+        info=DeviceInfo(**info) if isinstance(info, dict) else None,
     )

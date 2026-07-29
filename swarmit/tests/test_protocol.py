@@ -2,11 +2,20 @@ import pytest
 
 from swarmit.testbed.protocol import (
     CRASH_REPORT_SIZE,
+    IMAGE_DIGEST_LEN,
+    INFO_GEN_SIZE,
+    INFO_STRING_LEN,
     STATUS_LEGACY_SIZE,
+    PayloadDeviceInfo,
+    PayloadOTAStart,
+    PayloadRequestMessage,
     PayloadStatus,
+    PayloadType,
     decode_cfsr,
     decode_reset_reason,
     decode_sfsr,
+    decode_string_field,
+    encode_string_field,
 )
 
 
@@ -24,11 +33,13 @@ def test_payload_status_round_trip():
         sfsr=0x8,
         pc=0x0001_2345,
         lr=0x0001_2340,
+        info_gen=7,
     )
     raw = payload.to_bytes()
-    assert len(raw) == STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE
+    assert len(raw) == STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE + INFO_GEN_SIZE
 
     parsed = PayloadStatus().from_bytes(bytes(raw))
+    assert parsed.info_gen == 7
     assert parsed.device == 1
     assert parsed.status == 2
     assert parsed.battery == 2800
@@ -96,3 +107,121 @@ def test_decode_sfsr():
     # NS write into a secure region -> attribution unit violation
     assert decode_sfsr(1 << 3) == "AUVIOL"
     assert decode_sfsr(1 << 0) == "INVEP"
+
+
+def test_payload_status_pre_generation_frame():
+    # Firmware with a crash report but no generation counter: the frame is one
+    # byte short and must still parse, reporting generation 0.
+    frame = PayloadStatus(device=1, status=1, battery=2900).to_bytes()[
+        : STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE
+    ]
+    parsed = PayloadStatus().from_bytes(bytes(frame))
+    assert parsed.battery == 2900
+    assert parsed.info_gen == 0
+
+
+def test_device_info_matches_firmware_wire_size():
+    # 155 bytes is the contract the firmware asserts on its own struct. If
+    # this changes, swrmt_device_info_pkt_t must change with it.
+    assert PayloadDeviceInfo().size == 155
+
+
+def test_payload_device_info_round_trip():
+    payload = PayloadDeviceInfo(
+        info_version=1,
+        info_gen=42,
+        boot_count=37,
+        uptime_s=4324,
+        boot_reason=1,
+        bl_version=encode_string_field("0.9.0-3-g29e2704"),
+        net_version=encode_string_field("0.9.0-3-g29e2704"),
+        image_state=0,
+        image_result=1,
+        image_size=59360,
+        image_digest=bytes.fromhex("3f9a2c81d4e5b607"),
+        image_name=encode_string_field("lakers-sandbox.bin"),
+        image_version=encode_string_field("0.9.0-12-g1a2b3c4"),
+        lh2_homography_count=4,
+        lh2_flags=0b11,
+    )
+    parsed = PayloadDeviceInfo().from_bytes(bytes(payload.to_bytes()))
+
+    assert parsed.info_gen == 42
+    assert parsed.boot_count == 37
+    assert parsed.uptime_s == 4324
+    assert parsed.image_size == 59360
+    assert bytes(parsed.image_digest).hex() == "3f9a2c81d4e5b607"
+    assert decode_string_field(parsed.image_name) == "lakers-sandbox.bin"
+    assert decode_string_field(parsed.image_version) == "0.9.0-12-g1a2b3c4"
+    assert decode_string_field(parsed.bl_version) == "0.9.0-3-g29e2704"
+    assert parsed.lh2_homography_count == 4
+    assert parsed.lh2_flags == 0b11
+
+
+def test_payload_device_info_short_payload_does_not_raise():
+    # A bot running older firmware, or a truncated frame, parses as zeros
+    # rather than taking down the RX thread.
+    parsed = PayloadDeviceInfo().from_bytes(b"\x01\x05")
+    assert parsed.info_version == 1
+    assert parsed.info_gen == 5
+    assert parsed.image_size == 0
+    assert decode_string_field(parsed.image_name) == ""
+
+
+def test_string_fields_are_nul_padded_and_truncated():
+    # Exactly 32 bytes on the wire, always NUL-terminated, so a name at or
+    # past the cap cannot run into the field that follows it.
+    assert len(encode_string_field("short")) == INFO_STRING_LEN
+    assert encode_string_field("short")[5:] == bytes(INFO_STRING_LEN - 5)
+
+    long_name = "x" * 100
+    encoded = encode_string_field(long_name)
+    assert len(encoded) == INFO_STRING_LEN
+    assert encoded[-1] == 0
+    assert decode_string_field(encoded) == "x" * (INFO_STRING_LEN - 1)
+
+    # 31 characters is the longest that survives intact.
+    edge = "y" * (INFO_STRING_LEN - 1)
+    assert decode_string_field(encode_string_field(edge)) == edge
+
+
+def test_payload_ota_start_carries_image_labels():
+    payload = PayloadOTAStart(
+        fw_length=1024,
+        fw_chunk_count=8,
+        image_name="move-and-blink.bin",
+        image_version="2.0",
+    )
+    raw = payload.to_bytes()
+    # 9 bytes of the original message plus the two 32-byte labels.
+    assert len(raw) == 9 + 2 * INFO_STRING_LEN
+
+    parsed = PayloadOTAStart().from_bytes(bytes(raw))
+    assert parsed.fw_length == 1024
+    assert parsed.version == 2
+    assert decode_string_field(parsed.image_name) == "move-and-blink.bin"
+    assert decode_string_field(parsed.image_version) == "2.0"
+
+
+def test_payload_ota_start_defaults_to_empty_labels():
+    # A flash with no labels still produces a well-formed packet; the device
+    # reads empty strings and the host falls back to the digest.
+    raw = PayloadOTAStart(fw_length=8, fw_chunk_count=1).to_bytes()
+    assert len(raw) == 9 + 2 * INFO_STRING_LEN
+    parsed = PayloadOTAStart().from_bytes(bytes(raw))
+    assert decode_string_field(parsed.image_name) == ""
+
+
+def test_payload_request_message_defaults_to_device_info():
+    payload = PayloadRequestMessage()
+    raw = payload.to_bytes()
+    assert len(raw) == 2
+    assert raw[0] == PayloadType.SWARMIT_DEVICE_INFO_RESP
+    assert raw[1] == 0
+
+    parsed = PayloadRequestMessage().from_bytes(bytes(raw))
+    assert parsed.msg_id == PayloadType.SWARMIT_DEVICE_INFO_RESP
+
+
+def test_image_digest_length_matches_firmware():
+    assert IMAGE_DIGEST_LEN == 8

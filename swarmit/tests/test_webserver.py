@@ -254,7 +254,9 @@ def test_flash_when_device_not_ready(client):
 
 
 def test_flash_missing_start_ota(client, monkeypatch):
-    def fake_start_ota(self, fw, devices=None):
+    def fake_start_ota(
+        self, fw, devices=None, image_name="", image_version=""
+    ):
         return {"missed": ["00000001"], "acked": []}
 
     monkeypatch.setattr(

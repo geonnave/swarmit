@@ -53,6 +53,9 @@ class PayloadType(IntEnum):
     SWARMIT_OTA_BLOCK_REPORT_RESP = 0x8B
     SWARMIT_OTA_FINALIZE = 0x8C
     SWARMIT_OTA_FINALIZE_RESP = 0x8D
+    # Generic one-shot query and the one reply it can currently ask for.
+    SWARMIT_REQUEST_MESSAGE = 0x8E
+    SWARMIT_DEVICE_INFO_RESP = 0x8F
 
     # Custom messages
     SWARMIT_MESSAGE = 0xA0
@@ -182,6 +185,69 @@ STATUS_LEGACY_SIZE = 12
 # Size of the crash report appended to status payloads (mirrors
 # ipc_crash_report_t in the swarmit firmware).
 CRASH_REPORT_SIZE = 22
+# Size of the generation counter appended after the crash report.
+INFO_GEN_SIZE = 1
+
+# Width of the identity strings on the wire, NUL-padded. Mirrors
+# SWRMT_INFO_STRING_LEN in the firmware; Matter, Zigbee and Thread all cap
+# identity strings at 32 bytes and this follows them.
+INFO_STRING_LEN = 32
+# Bytes of the image SHA256 carried on the wire (the device keeps all 32).
+IMAGE_DIGEST_LEN = 8
+# Schema version this host understands in SWARMIT_DEVICE_INFO_RESP.
+DEVICE_INFO_VERSION = 1
+
+
+class ImageState(Enum):
+    """Image lifecycle. LwM2M Object 5 resource 3 (State)."""
+
+    Idle = 0
+    Downloading = 1
+    Downloaded = 2
+    Updating = 3
+
+
+class ImageResult(Enum):
+    """Outcome of the last transfer. LwM2M Object 5 resource 5."""
+
+    Initial = 0
+    Success = 1
+    NotEnoughFlash = 2
+    ConnectionLost = 4
+    IntegrityCheckFailure = 5
+    UpdateFailed = 8
+
+
+class BootReason(Enum):
+    """Why the device last booted. Matter BootReasonEnum (cluster 0x0033)."""
+
+    Unspecified = 0
+    PowerOnReboot = 1
+    BrownOutReset = 2
+    SoftwareWatchdogReset = 3
+    HardwareWatchdogReset = 4
+    SoftwareUpdateCompleted = 5
+    SoftwareReset = 6
+
+
+# Bits of the lh2_flags field.
+LH2_FLAG_VALID = 1 << 0
+LH2_FLAG_FROM_FLASH = 1 << 1
+
+
+def decode_string_field(raw: bytes) -> str:
+    """Decode a NUL-padded fixed-width identity string off the wire."""
+    return bytes(raw).split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+
+
+def encode_string_field(value: str, length: int = INFO_STRING_LEN) -> bytes:
+    """Encode a string into a fixed-width NUL-padded field.
+
+    Truncates at length - 1 so the field always ends NUL-terminated, which is
+    what the firmware's fixed-width char arrays assume.
+    """
+    raw = (value or "").encode("utf-8")[: length - 1]
+    return raw + bytes(length - len(raw))
 
 
 # Requests
@@ -207,6 +273,7 @@ class PayloadStatus(Payload):
             PayloadFieldMetadata(name="sfsr", disp="sfsr", length=4),
             PayloadFieldMetadata(name="pc", disp="pc", length=4),
             PayloadFieldMetadata(name="lr", disp="lr", length=4),
+            PayloadFieldMetadata(name="info_gen", disp="gen"),
         ]
     )
 
@@ -222,13 +289,20 @@ class PayloadStatus(Payload):
     sfsr: int = 0
     pc: int = 0
     lr: int = 0
+    # Changes whenever anything in the device-info block changes. The
+    # controller refetches on any difference from what it cached, so the
+    # steady state costs no device-info traffic at all.
+    info_gen: int = 0
 
     def from_bytes(self, bytes_):
-        # Firmware without crash-report support sends the legacy short
-        # payload; parse it with a zeroed crash report so mixed fleets keep
-        # reporting status during the bootloader rollout.
+        # Each block was appended to this frame in a different release, so a
+        # short payload means "that firmware predates this field", not a
+        # corrupt frame. Zero-fill the missing tail so a mixed fleet keeps
+        # reporting status through a rollout.
         if len(bytes_) == STATUS_LEGACY_SIZE:
             bytes_ = bytes(bytes_) + bytes(CRASH_REPORT_SIZE)
+        if len(bytes_) == STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE:
+            bytes_ = bytes(bytes_) + bytes(INFO_GEN_SIZE)
         return super().from_bytes(bytes_)
 
 
@@ -275,8 +349,10 @@ class PayloadReset(Payload):
 class PayloadOTAStart(Payload):
     """Dataclass that holds an OTA start packet.
 
-    `version` is appended at the end so a legacy bootloader that parses only
-    the first 8 bytes (image size + chunk count) tolerates the extra byte.
+    Everything after the first 8 bytes (image size + chunk count) was appended
+    later. The device reads this with a pointer cast and checks the received
+    length, so an older bootloader ignores the tail and a newer one treats a
+    short packet as "name and version not sent".
     """
 
     metadata: list[PayloadFieldMetadata] = dataclasses.field(
@@ -286,12 +362,38 @@ class PayloadOTAStart(Payload):
                 name="fw_chunk_counts", disp="chunks", length=4
             ),
             PayloadFieldMetadata(name="version", disp="ver.", length=1),
+            PayloadFieldMetadata(
+                name="image_name",
+                disp="name",
+                type_=bytes,
+                length=INFO_STRING_LEN,
+            ),
+            PayloadFieldMetadata(
+                name="image_version",
+                disp="img ver.",
+                type_=bytes,
+                length=INFO_STRING_LEN,
+            ),
         ]
     )
 
     fw_length: int = 0
     fw_chunk_count: int = 0
     version: int = OTA_PROTOCOL_VERSION_BLOCK
+    image_name: bytes = dataclasses.field(
+        default_factory=lambda: bytes(INFO_STRING_LEN)
+    )
+    image_version: bytes = dataclasses.field(
+        default_factory=lambda: bytes(INFO_STRING_LEN)
+    )
+
+    def __post_init__(self):
+        # Accept plain strings at the call site and normalise to the
+        # fixed-width NUL-padded form the wire and the firmware expect.
+        if isinstance(self.image_name, str):
+            self.image_name = encode_string_field(self.image_name)
+        if isinstance(self.image_version, str):
+            self.image_version = encode_string_field(self.image_version)
 
 
 @dataclass
@@ -447,6 +549,115 @@ class PayloadOTAFinalizeResp(Payload):
 
 
 @dataclass
+class PayloadRequestMessage(Payload):
+    """Host -> device: emit one message, once.
+
+    Generic on purpose. MAVLink replaced ~15 bespoke MAV_CMD_REQUEST_*
+    commands with a single MAV_CMD_REQUEST_MESSAGE, so a future query here
+    adds a `msg_id` rather than another request/response pair.
+    """
+
+    metadata: list[PayloadFieldMetadata] = dataclasses.field(
+        default_factory=lambda: [
+            PayloadFieldMetadata(name="msg_id", disp="msg"),
+            PayloadFieldMetadata(name="flags", disp="fl."),
+        ]
+    )
+
+    msg_id: int = PayloadType.SWARMIT_DEVICE_INFO_RESP
+    flags: int = 0
+
+
+@dataclass
+class PayloadDeviceInfo(Payload):
+    """Device -> host: what this bot is running.
+
+    Read once and cached; refreshed only when the status frame's `info_gen`
+    stops matching the value this reply carried.
+    """
+
+    metadata: list[PayloadFieldMetadata] = dataclasses.field(
+        default_factory=lambda: [
+            PayloadFieldMetadata(name="info_version", disp="v"),
+            PayloadFieldMetadata(name="info_gen", disp="gen"),
+            PayloadFieldMetadata(name="boot_count", disp="boots", length=4),
+            PayloadFieldMetadata(name="uptime_s", disp="up", length=4),
+            PayloadFieldMetadata(name="boot_reason", disp="why"),
+            PayloadFieldMetadata(
+                name="bl_version",
+                disp="bl",
+                type_=bytes,
+                length=INFO_STRING_LEN,
+            ),
+            PayloadFieldMetadata(
+                name="net_version",
+                disp="net",
+                type_=bytes,
+                length=INFO_STRING_LEN,
+            ),
+            PayloadFieldMetadata(name="image_state", disp="st."),
+            PayloadFieldMetadata(name="image_result", disp="res."),
+            PayloadFieldMetadata(name="image_size", disp="size", length=4),
+            PayloadFieldMetadata(
+                name="image_digest",
+                disp="digest",
+                type_=bytes,
+                length=IMAGE_DIGEST_LEN,
+            ),
+            PayloadFieldMetadata(
+                name="image_name",
+                disp="name",
+                type_=bytes,
+                length=INFO_STRING_LEN,
+            ),
+            PayloadFieldMetadata(
+                name="image_version",
+                disp="ver.",
+                type_=bytes,
+                length=INFO_STRING_LEN,
+            ),
+            PayloadFieldMetadata(name="lh2_homography_count", disp="lh2"),
+            PayloadFieldMetadata(name="lh2_flags", disp="lh2f"),
+        ]
+    )
+
+    info_version: int = 0
+    info_gen: int = 0
+    boot_count: int = 0
+    uptime_s: int = 0
+    boot_reason: int = 0
+    bl_version: bytes = dataclasses.field(
+        default_factory=lambda: bytes(INFO_STRING_LEN)
+    )
+    net_version: bytes = dataclasses.field(
+        default_factory=lambda: bytes(INFO_STRING_LEN)
+    )
+    image_state: int = 0
+    image_result: int = 0
+    image_size: int = 0
+    image_digest: bytes = dataclasses.field(
+        default_factory=lambda: bytes(IMAGE_DIGEST_LEN)
+    )
+    image_name: bytes = dataclasses.field(
+        default_factory=lambda: bytes(INFO_STRING_LEN)
+    )
+    image_version: bytes = dataclasses.field(
+        default_factory=lambda: bytes(INFO_STRING_LEN)
+    )
+    lh2_homography_count: int = 0
+    lh2_flags: int = 0
+
+    def from_bytes(self, bytes_):
+        # A device speaking a newer schema appends fields; parse the prefix we
+        # know and ignore the rest rather than refusing the whole reply. A
+        # short payload is zero-filled for the same reason the status frame
+        # is: it means "older firmware", not "corrupt".
+        if len(bytes_) < self.size:
+            bytes_ = bytes(bytes_) + bytes(self.size - len(bytes_))
+        return super().from_bytes(bytes_[: self.size])
+
+
+@dataclass
 class PayloadEvent(Payload):
     """Dataclass that holds an event notification packet."""
 
@@ -499,6 +710,8 @@ register_parser(
 )
 register_parser(PayloadType.SWARMIT_OTA_FINALIZE, PayloadOTAFinalize)
 register_parser(PayloadType.SWARMIT_OTA_FINALIZE_RESP, PayloadOTAFinalizeResp)
+register_parser(PayloadType.SWARMIT_REQUEST_MESSAGE, PayloadRequestMessage)
+register_parser(PayloadType.SWARMIT_DEVICE_INFO_RESP, PayloadDeviceInfo)
 register_parser(PayloadType.SWARMIT_EVENT_LOG, PayloadEvent)
 register_parser(PayloadType.SWARMIT_MESSAGE, PayloadMessage)
 register_parser(PayloadType.SWARMIT_LH2_CALIBRATION, PayloadCalibrationData)
