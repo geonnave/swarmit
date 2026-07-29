@@ -38,3 +38,27 @@ void nvmc_write(const uint32_t *addr, const void *data, size_t len) {
 
     NRF_NVMC_S->CONFIGNS = (NVMC_CONFIG_WEN_Ren << NVMC_CONFIG_WEN_Pos);
 }
+
+void nvmc_page_erase_secure(uint32_t page) {
+
+    const uint32_t *addr = (const uint32_t *)(page * FLASH_PAGE_SIZE);
+
+    NRF_NVMC_S->CONFIG = (NVMC_CONFIG_WEN_Een << NVMC_CONFIG_WEN_Pos);
+    *(uint32_t *)addr  = 0xFFFFFFFF;
+    while (!NRF_NVMC_S->READY) {}
+    NRF_NVMC_S->CONFIG = (NVMC_CONFIG_WEN_Ren << NVMC_CONFIG_WEN_Pos);
+}
+
+void nvmc_write_secure(const uint32_t *addr, const void *data, size_t len) {
+
+    uint32_t       *dest_addr = (uint32_t *)addr;
+    const uint32_t *data_addr = data;
+
+    NRF_NVMC_S->CONFIG = (NVMC_CONFIG_WEN_Wen << NVMC_CONFIG_WEN_Pos);
+    for (uint32_t i = 0; i < (len >> 2); i++) {
+        *dest_addr++ = data_addr[i];
+        while (!NRF_NVMC_S->READY) {}
+    }
+
+    NRF_NVMC_S->CONFIG = (NVMC_CONFIG_WEN_Ren << NVMC_CONFIG_WEN_Pos);
+}
