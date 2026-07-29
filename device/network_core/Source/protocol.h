@@ -19,6 +19,55 @@
 #define SWRMT_OTA_BLOCK_SIZE        (32U)
 #define SWRMT_OTA_PROTOCOL_VERSION  (2U)
 
+/// Schema version carried in every SWRMT_MSG_DEVICE_INFO_RESP.
+#define SWRMT_DEVICE_INFO_VERSION   (1U)
+
+/// Ceiling for identity strings, including the NUL terminator. Matter
+/// (VendorName/ProductName/SerialNumber), Zigbee (ManufacturerName/
+/// ModelIdentifier) and Thread (VendorName/VendorModel) all converge on 32.
+#define SWRMT_INFO_STRING_LEN       (32U)
+
+/// Bytes of the image SHA256 that travel on the wire. The on-device record
+/// keeps all 32; a truncated digest is only ever compared, never trusted as a
+/// signature.
+#define SWRMT_IMAGE_DIGEST_LEN      (8U)
+
+/// Image lifecycle, LwM2M Object 5 resource 3 (State).
+typedef enum {
+    SWRMT_IMAGE_STATE_IDLE = 0,
+    SWRMT_IMAGE_STATE_DOWNLOADING = 1,
+    SWRMT_IMAGE_STATE_DOWNLOADED = 2,
+    SWRMT_IMAGE_STATE_UPDATING = 3,
+} swrmt_image_state_t;
+
+/// Outcome of the last image transfer, LwM2M Object 5 resource 5 (Update
+/// Result). Only the values this device can actually produce are listed.
+typedef enum {
+    SWRMT_IMAGE_RESULT_INITIAL = 0,
+    SWRMT_IMAGE_RESULT_SUCCESS = 1,
+    SWRMT_IMAGE_RESULT_NO_FLASH = 2,
+    SWRMT_IMAGE_RESULT_CONN_LOST = 4,
+    SWRMT_IMAGE_RESULT_INTEGRITY_FAIL = 5,   // whole-image SHA256 mismatch
+    SWRMT_IMAGE_RESULT_UPDATE_FAILED = 8,
+} swrmt_image_result_t;
+
+/// Why the device last booted. Matter BootReasonEnum verbatim (General
+/// Diagnostics cluster 0x0033, attribute 0x0004), mapped from RESETREAS plus
+/// the fault the previous run latched.
+typedef enum {
+    SWRMT_BOOT_REASON_UNSPECIFIED = 0,
+    SWRMT_BOOT_REASON_POWER_ON = 1,
+    SWRMT_BOOT_REASON_BROWN_OUT = 2,
+    SWRMT_BOOT_REASON_SW_WATCHDOG = 3,
+    SWRMT_BOOT_REASON_HW_WATCHDOG = 4,
+    SWRMT_BOOT_REASON_SW_UPDATE = 5,
+    SWRMT_BOOT_REASON_SW_RESET = 6,
+} swrmt_boot_reason_t;
+
+/// Bits of swrmt_device_info_pkt_t.lh2_flags.
+#define SWRMT_LH2_FLAG_VALID        (1U << 0)   // a usable homography set is loaded
+#define SWRMT_LH2_FLAG_FROM_FLASH   (1U << 1)   // it came from the provisioned config page
+
 typedef enum {
     SWRMT_DEVICE_TYPE_UNKNOWN = 0,
     SWRMT_DEVICE_TYPE_DOTBOTV3 = 1,
@@ -49,6 +98,8 @@ typedef enum {
     SWRMT_MSG_OTA_BLOCK_REPORT_RESP = 0x8B,  // device -> host: received bitmap for a block
     SWRMT_MSG_OTA_FINALIZE = 0x8C,           // host -> device: verify whole-image SHA256
     SWRMT_MSG_OTA_FINALIZE_RESP = 0x8D,      // device -> host: image SHA256 match result
+    SWRMT_MSG_REQUEST_MESSAGE = 0x8E,        // host -> device: emit one message once
+    SWRMT_MSG_DEVICE_INFO_RESP = 0x8F,       // device -> host: what this bot is running
     // FIXME: we need better namespacing for these messages, for example,
     // use 0x80 for SwarmIT application type, and then use an internal namespace for SwarmIT messages,
     // like 0x80.0x01 for SwarmIT status, 0x80.0x02 for SwarmIT start, etc.
@@ -88,11 +139,51 @@ typedef struct __attribute__((packed)) {
     uint8_t                 data[255];
 } swrmt_request_t;
 
+/// Read with a pointer cast from a buffer that may be shorter than this struct:
+/// name and version were appended after the fact, so check the received length
+/// before touching them (the same tolerance that let `version` be appended).
 typedef struct __attribute__((packed)) {
     uint32_t image_size;                        ///< User image size in bytes
     uint32_t chunk_count;
     uint8_t  version;                           ///< OTA protocol version (2 = block; absent/other = legacy)
+    char     image_name[SWRMT_INFO_STRING_LEN];     ///< LwM2M Object 5 res 6 PkgName, display only
+    char     image_version[SWRMT_INFO_STRING_LEN];  ///< LwM2M Object 5 res 7 PkgVersion, display only
 } swrmt_ota_start_pkt_t;
+
+/// Bytes a controller must send for image_name/image_version to be present.
+#define SWRMT_OTA_START_NAMED_SIZE  (sizeof(swrmt_ota_start_pkt_t))
+
+/// Generic one-shot query. Modelled on MAVLink's MAV_CMD_REQUEST_MESSAGE
+/// (512), which superseded ~15 bespoke MAV_CMD_REQUEST_* commands: a future
+/// query adds a msg_id here rather than a new message pair.
+typedef struct __attribute__((packed)) {
+    uint8_t msg_id;                             ///< which message to emit once
+    uint8_t flags;                              ///< reserved (response target); must be 0
+} swrmt_request_message_pkt_t;
+
+/// Inventory the host reads once and caches, refreshed when info_gen changes.
+/// Field names follow LwM2M Object 5 and Matter General Diagnostics so a
+/// gateway-side bridge to either is a field mapping rather than a redesign.
+typedef struct __attribute__((packed)) {
+    uint8_t  info_version;                          ///< schema version of this message
+    uint8_t  info_gen;                              ///< echoes the status counter (detects an in-flight change)
+    uint32_t boot_count;                            ///< Matter RebootCount, widened to u32 (a bot reboots per experiment)
+    uint32_t uptime_s;                              ///< Matter UpTime, narrowed to u32 (136 years)
+    uint8_t  boot_reason;                           ///< swrmt_boot_reason_t
+    char     bl_version[SWRMT_INFO_STRING_LEN];     ///< bootloader   git describe --always --dirty
+    char     net_version[SWRMT_INFO_STRING_LEN];    ///< network core git describe --always --dirty
+    uint8_t  image_state;                           ///< swrmt_image_state_t
+    uint8_t  image_result;                          ///< swrmt_image_result_t
+    uint32_t image_size;                            ///< bytes, as flashed
+    uint8_t  image_digest[SWRMT_IMAGE_DIGEST_LEN];  ///< first bytes of the image SHA256; the machine-comparable identity
+    char     image_name[SWRMT_INFO_STRING_LEN];     ///< LwM2M Object 5 res 6 PkgName, display only
+    char     image_version[SWRMT_INFO_STRING_LEN];  ///< LwM2M Object 5 res 7 PkgVersion, display only
+    uint8_t  lh2_homography_count;                  ///< 0 = uncalibrated
+    uint8_t  lh2_flags;                             ///< SWRMT_LH2_FLAG_*
+} swrmt_device_info_pkt_t;
+
+_Static_assert(sizeof(swrmt_device_info_pkt_t) == 155,
+               "swrmt_device_info_pkt_t is a wire format; its size is part of the contract");
 
 typedef struct __attribute__((packed)) {
     uint32_t index;                             ///< Index of the chunk

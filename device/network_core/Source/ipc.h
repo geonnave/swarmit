@@ -74,7 +74,30 @@ typedef struct {
     uint8_t  finalize_expected[SWRMT_OTA_SHA256_LENGTH];  ///< Expected whole-image SHA256 (FINALIZE)
     uint8_t  finalize_ok;                                 ///< FINALIZE result (1 = image SHA256 matched)
     uint8_t chunk[INT8_MAX + 1];
+    char     pending_name[SWRMT_INFO_STRING_LEN];         ///< image_name from OTA_START, promoted to the device record on verified finalize
+    char     pending_version[SWRMT_INFO_STRING_LEN];      ///< image_version from OTA_START, promoted the same way
 } ipc_ota_data_t;
+
+/// What this bot is running: the inventory the host reads once and caches.
+/// The app core owns everything derived from the flash record; the net core
+/// owns its own version string and the LH2 fields it loads from the config
+/// page. Shared memory only, never serialized: unpacked so the compiler keeps
+/// its size a multiple of 4 and the members after it stay word-aligned.
+typedef struct {
+    uint32_t boot_count;
+    uint32_t image_size;
+    uint8_t  image_digest[SWRMT_IMAGE_DIGEST_LEN];
+    char     image_name[SWRMT_INFO_STRING_LEN];
+    char     image_version[SWRMT_INFO_STRING_LEN];
+    char     bl_version[SWRMT_INFO_STRING_LEN];     ///< app core writes
+    char     net_version[SWRMT_INFO_STRING_LEN];    ///< net core writes
+    uint8_t  info_gen;                              ///< bumped on boot and on OTA finalize; the host refetches on any change
+    uint8_t  boot_reason;                           ///< swrmt_boot_reason_t
+    uint8_t  image_state;                           ///< swrmt_image_state_t
+    uint8_t  image_result;                          ///< swrmt_image_result_t
+    uint8_t  lh2_homography_count;                  ///< net core writes
+    uint8_t  lh2_flags;                             ///< net core writes
+} ipc_device_info_t;
 
 /// LH2 calibration data
 typedef struct __attribute__((packed)) {
@@ -114,6 +137,7 @@ typedef struct __attribute__((packed)) {
     ipc_radio_pdu_t         tx_pdu;             ///< TX pdu
     ipc_radio_pdu_t         rx_pdu;             ///< RX pdu
     ipc_lh2_calibration_t    lh2_calibration;     ///< LH2 calibration data
+    ipc_device_info_t       device_info;        ///< What this bot is running
     ipc_crash_report_t      crash_report;       ///< Cause of the most recent reset
 } ipc_shared_data_t;
 
@@ -131,6 +155,10 @@ _Static_assert(offsetof(ipc_shared_data_t, current_position) % 4 == 0,
                "current_position must be 4-byte aligned");
 _Static_assert(offsetof(ipc_shared_data_t, lh2_calibration) % 4 == 0,
                "lh2_calibration must be 4-byte aligned");
+_Static_assert(sizeof(ipc_device_info_t) % 4 == 0,
+               "ipc_device_info_t size must be a multiple of 4");
+_Static_assert(offsetof(ipc_shared_data_t, device_info) % 4 == 0,
+               "device_info must be 4-byte aligned");
 _Static_assert(offsetof(ipc_shared_data_t, crash_report) % 4 == 0,
                "crash_report must be 4-byte aligned");
 
