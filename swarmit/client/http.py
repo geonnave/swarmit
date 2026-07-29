@@ -213,6 +213,20 @@ class HTTPSwarmitClient:
     def request_lh2_capture(self, device_addr: str) -> None:
         self._request("POST", "/lh2_capture", body={"device": device_addr})
 
+    def refresh_device_info(self, devices: list[str] | None = None) -> None:
+        """Ask the selected devices for their device-info block and wait.
+
+        A daemon predating this route answers 404; the cached block from the
+        background refresh is then whatever `status()` already returned, so
+        `info` degrades to showing that rather than failing.
+        """
+        try:
+            self._request(
+                "POST", "/device_info", body={"devices": devices or None}
+            )
+        except RuntimeError:
+            pass
+
     def close(self) -> None:
         # No persistent connection to close (stdlib urllib opens per-request).
         pass

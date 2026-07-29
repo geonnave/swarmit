@@ -662,12 +662,16 @@ def info(ctx):
     """Show full detail for the selected device(s).
 
     Everything from the status packet plus the raw crash report (decoded
-    reset reason, fault status registers, and faulting PC/LR). Scope it
-    with the group's -d/--devices option, e.g. `swarm -d <addr> info`;
-    with no -d it shows every known device.
+    reset reason, fault status registers, and faulting PC/LR), and what the
+    device reports it is running: image, sandbox firmware versions,
+    calibration and uptime. Scope it with the group's -d/--devices option,
+    e.g. `swarm -d <addr> info`; with no -d it shows every known device.
     """
     settings = ctx.obj["settings"]
     with build_client(settings, no_server=ctx.obj["no_server"]) as client:
+        # Ask rather than wait for the background sweep: `info` is the
+        # command an operator runs precisely when they want it now.
+        client.refresh_device_info(settings.devices or None)
         print(generate_info(client.status(), settings.devices))
 
 

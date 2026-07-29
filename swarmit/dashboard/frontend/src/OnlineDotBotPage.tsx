@@ -3,6 +3,7 @@ import {
   API_URL,
   authHeaders,
   DotBotData,
+  imageLabel,
   isAuthorized,
   StatusType,
   Token,
@@ -159,6 +160,7 @@ export default function OnlineDotBotPage({ dotbots, token, tokenActiveness }: Ca
               <th className="py-3 px-4 text-left font-semibold">Status</th>
               <th className="py-3 px-4 text-left font-semibold">Battery</th>
               <th className="py-3 px-4 text-left font-semibold">Pos (x, y)</th>
+              <th className="py-3 px-4 text-left font-semibold">Image</th>
               {isActive && (
                 <>
                   <th className="py-3 px-4 text-left font-semibold" onClick={toggleAll}>Action</th>
@@ -179,6 +181,12 @@ export default function OnlineDotBotPage({ dotbots, token, tokenActiveness }: Ca
                 <td className="py-3 px-4 border-t"><StatusBadge status={bot.status} /></td>
                 <td className="py-3 px-4 border-t"><BatteryCell voltage={bot.battery} /></td>
                 <td className="py-3 px-4 border-t font-mono text-sm">{`(${Math.round(bot.pos_x)}, ${Math.round(bot.pos_y)})`}</td>
+                <td
+                  className="py-3 px-4 border-t font-mono text-sm"
+                  title={bot.info ? `digest ${bot.info.image_digest}${bot.info.image_version ? ` - version ${bot.info.image_version}` : ""}` : "device has not reported an image"}
+                >
+                  {imageLabel(bot)}
+                </td>
                 {isActive && (
                   <>
                     <td className="py-3 px-4 border-t">

@@ -219,6 +219,12 @@ class FlashRequest(BaseModel):
     image_version: str = ""
 
 
+class DeviceInfoRequest(BaseModel):
+    """Refresh the device-info cache. None = every known device."""
+
+    devices: Optional[List[str]] = None
+
+
 class MessageRequest(BaseModel):
     message: str
 
@@ -586,6 +592,19 @@ async def lh2_capture(request: Request, payload: CaptureRequest):
     controller: Controller = request.app.state.controller
     async with controller_lock:
         await run_in_threadpool(controller.request_lh2_capture, payload.device)
+    return JSONResponse(content={"response": "done"})
+
+
+@api.post("/device_info", dependencies=[Depends(verify_jwt)])
+async def device_info(request: Request, payload: DeviceInfoRequest):
+    """Ask devices to re-report what they are running, and wait for replies.
+
+    The background refresh already keeps this current; this route exists so
+    `info` can ask explicitly instead of waiting for the next sweep.
+    """
+    controller: Controller = request.app.state.controller
+    async with controller_lock:
+        await run_in_threadpool(controller.fetch_device_info, payload.devices)
     return JSONResponse(content={"response": "done"})
 
 

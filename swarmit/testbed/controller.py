@@ -345,6 +345,49 @@ def reset_cause_color(device_data) -> str:
     return "cyan"
 
 
+def format_uptime(seconds: int) -> str:
+    """Uptime as the operator reads it, not as a raw second count."""
+    hours, rem = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def image_mismatches(status_data) -> tuple[str, list[tuple[str, DeviceInfo]]]:
+    """The fleet's majority image digest, and every device that differs.
+
+    Comparison is on the digest, never the name: the name is display-only and
+    two bots can carry the same label with different bytes. Devices that have
+    not reported device info yet are not counted either way - unknown is not
+    the same as different.
+    """
+    known = {
+        addr: data.info
+        for addr, data in status_data.items()
+        if data.info is not None and data.info.image_digest
+    }
+    if len(known) < 2:
+        return "", []
+    counts: dict[str, int] = {}
+    for info in known.values():
+        counts[info.image_digest] = counts.get(info.image_digest, 0) + 1
+    majority = max(counts, key=lambda digest: (counts[digest], digest))
+    if counts[majority] == len(known):
+        return majority, []
+    odd = sorted(
+        (
+            (addr, info)
+            for addr, info in known.items()
+            if info.image_digest != majority
+        ),
+        key=lambda item: item[0],
+    )
+    return majority, odd
+
+
 def generate_status(status_data, devices=[], status_message="found"):
     data = {
         addr: device_data
@@ -382,11 +425,25 @@ def generate_status(status_data, devices=[], status_message="found"):
         width=max([len(m) for m in StatusType.__members__]),
     )
     table.add_column(
+        "Image",
+        style="cyan",
+        justify="center",
+    )
+    table.add_column(
         "Last reset",
         style="cyan",
         justify="center",
     )
+    majority, odd_ones = image_mismatches(data)
+    odd_addrs = {addr for addr, _ in odd_ones}
     for device_addr, device_data in sorted(data.items()):
+        info = device_data.info
+        # "-" means the bot has not answered yet, which is what an older
+        # bootloader looks like. It is deliberately not the same as a blank
+        # name on a bot that did answer - that falls back to the digest.
+        image = info.image_label if info else "-"
+        if device_addr in odd_addrs:
+            image = f"[yellow]{image}"
 
         table.add_row(
             f"{device_addr}",
@@ -394,9 +451,33 @@ def generate_status(status_data, devices=[], status_message="found"):
             f"[{battery_level_color(device_data.battery)}]{device_data.battery / 1000:.2f}V ({int(device_data.battery / 3000 * 100)}%)",
             f"({device_data.pos_x}, {device_data.pos_y})",
             f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
+            image,
             f"[{reset_cause_color(device_data)}]{format_reset_cause(device_data)}",
         )
-    return Group(header, table)
+    if not odd_ones:
+        return Group(header, table)
+
+    # The point of putting a digest on the wire: the odd bot out surfaces
+    # without an operator reading a hundred rows.
+    plural = "s" if len(odd_ones) > 1 else ""
+    lines = [
+        Text(""),
+        Text(
+            f"! {len(odd_ones)} of {len(data)} device{plural} "
+            f"differ{'' if len(odd_ones) > 1 else 's'} from the fleet majority:",
+            style="yellow",
+        ),
+    ]
+    for addr, info in odd_ones:
+        label = f" ({info.image_name})" if info.image_name else ""
+        lines.append(
+            Text(
+                f"    {addr}  image {info.image_digest[:16]}{label}, "
+                f"majority is {majority[:16]}",
+                style="yellow",
+            )
+        )
+    return Group(header, table, *lines)
 
 
 def generate_info(status_data, devices=[]):
@@ -431,6 +512,34 @@ def generate_info(status_data, devices=[]):
         if d.last_updated_at:
             age = max(0.0, time.time() - d.last_updated_at)
             table.add_row("Last update", f"{age:.1f}s ago")
+
+        if d.info is not None:
+            info = d.info
+            table.add_row("", "")
+            table.add_row("Image", info.image_label)
+            if info.image_version:
+                table.add_row("  version", info.image_version)
+            if info.image_digest:
+                table.add_row("  digest", info.image_digest)
+            if info.image_size:
+                chunks = -(-info.image_size // CHUNK_SIZE)
+                table.add_row(
+                    "  size", f"{info.image_size} B ({chunks} chunks)"
+                )
+            table.add_row(
+                "  state",
+                f"{info.image_state_name} / {info.image_result_name}",
+            )
+
+            table.add_row("", "")
+            table.add_row("Sandbox fw", f"bootloader  {info.bl_version}")
+            table.add_row("", f"netcore     {info.net_version}")
+            table.add_row("LH2 calibration", info.lh2_summary)
+            table.add_row(
+                "Uptime",
+                f"{format_uptime(info.uptime_s)}   "
+                f"(boot #{info.boot_count}, {info.boot_reason_name})",
+            )
 
         table.add_row("", "")
         table.add_row(
