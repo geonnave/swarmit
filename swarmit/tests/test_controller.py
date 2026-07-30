@@ -7,7 +7,6 @@ import pytest
 from marilib.model import GatewayInfo, MariGateway
 
 from swarmit.testbed.controller import (
-    DEVICE_INFO_MAX_ATTEMPTS,
     Chunk,
     Controller,
     ControllerSettings,
@@ -843,12 +842,13 @@ def test_device_info_fetched_once_per_change():
 @patch(
     "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
 )
-def test_device_info_gives_up_on_silent_firmware():
-    """Firmware predating the message must not be asked forever.
+def test_firmware_without_device_info_is_never_asked():
+    """A zero generation counter identifies firmware that cannot answer.
 
-    It reports generation 0 and never replies, so without a cap the
-    controller would put a broadcast on the downlink every refresh interval
-    for the life of the session.
+    That is a property of the device rather than a guess from a timeout, so it
+    is recognised on the first status frame and never costs a request - where
+    an attempt cap would have spent several broadcasts learning it, every
+    session.
     """
     controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
     test_adapter = controller.interface.mari.serial_interface
@@ -865,19 +865,14 @@ def test_device_info_gives_up_on_silent_firmware():
     while time.time() < deadline and controller.status_data.get(addr) is None:
         time.sleep(0.01)
 
-    # Drive the sweep directly rather than waiting on the cleanup thread's
-    # 1 Hz tick: what is under test is the attempt cap, not the scheduling.
-    assert controller.stale_device_info() == [addr]
-    for _ in range(DEVICE_INFO_MAX_ATTEMPTS):
+    assert controller.stale_device_info() == []
+    for _ in range(3):
         controller._info_last_broadcast = 0.0
         controller._refresh_stale_device_info()
-
-    assert controller.stale_device_info() == []
-    assert controller.status_data[addr].info is None
     assert node.device_info_requests == 0
+    assert controller.status_data[addr].info is None
 
-    # A change on the bot re-opens the question, so a re-flashed device is
-    # not written off forever by a verdict reached before it was reflashed.
+    # Firmware that does report a counter is asked, even having been quiet.
     node.info_gen = 9
     deadline = time.time() + 3
     while (
@@ -1042,7 +1037,8 @@ def test_device_info_reply_survives_a_concurrent_timeout():
     controller.settings = ControllerSettings()
     controller.status_data = {}
     controller._device_info = {}
-    controller._info_attempts = {}
+    controller._info_backoff = {}
+    controller._info_next_try = {}
     controller._info_gen_seen = {}
     controller._info_forced = set()
     controller._block_transfer = None
@@ -1135,7 +1131,7 @@ def test_fetch_accepts_a_lowercase_device_argument():
     controller.terminate()
 
 
-def test_unusable_device_info_is_dropped_and_still_counts_as_a_miss():
+def test_unusable_device_info_is_dropped_and_does_not_reset_backoff():
     """A reply that cannot resolve staleness must not reset the attempt cap.
 
     A truncated body zero-fills to `info_version = 0`. Caching it, or clearing
@@ -1153,7 +1149,8 @@ def test_unusable_device_info_is_dropped_and_still_counts_as_a_miss():
     controller.settings = ControllerSettings()
     controller.status_data = {"00000033": NodeStatus(info_gen=7)}
     controller._device_info = {}
-    controller._info_attempts = {"00000033": 2}
+    controller._info_backoff = {"00000033": 4.0}
+    controller._info_next_try = {"00000033": 0.0}
     controller._info_gen_seen = {}
     controller._info_forced = set()
     controller._block_transfer = None
@@ -1169,10 +1166,11 @@ def test_unusable_device_info_is_dropped_and_still_counts_as_a_miss():
     )
 
     assert "00000033" not in controller._device_info
-    assert controller._info_attempts["00000033"] == 2
+    # The backoff survives, so an unusable reply does not reset the schedule.
+    assert controller._info_backoff["00000033"] == 4.0
 
 
-def test_matching_generation_clears_the_attempt_cap():
+def test_matching_generation_clears_the_backoff():
     from unittest.mock import MagicMock
 
     from dotbot_utils.protocol import Packet
@@ -1184,7 +1182,8 @@ def test_matching_generation_clears_the_attempt_cap():
     controller.settings = ControllerSettings()
     controller.status_data = {"00000044": NodeStatus(info_gen=7)}
     controller._device_info = {}
-    controller._info_attempts = {"00000044": 2}
+    controller._info_backoff = {"00000044": 4.0}
+    controller._info_next_try = {"00000044": 0.0}
     controller._info_gen_seen = {}
     controller._info_forced = set()
     controller._block_transfer = None
@@ -1201,4 +1200,91 @@ def test_matching_generation_clears_the_attempt_cap():
     )
 
     assert controller._device_info["00000044"].info_gen == 7
-    assert "00000044" not in controller._info_attempts
+    assert "00000044" not in controller._info_backoff
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_REFRESH_INTERVAL", 1.0)
+@patch("swarmit.testbed.controller.DEVICE_INFO_BACKOFF_MAX", 8.0)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_unanswered_device_backs_off_but_is_never_written_off():
+    """A device that should answer and does not is asked less, not never.
+
+    It reports a real generation counter, so it is not old firmware - it is
+    busy. Giving up would leave it showing as unknown until something else
+    moved its counter; backing off bounds the traffic instead.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(
+        address=0x55,
+        adapter=test_adapter,
+        info_gen=4,
+        answers_device_info=False,
+    )
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    seen = []
+    for _ in range(5):
+        controller._info_last_broadcast = 0.0
+        controller._info_next_try[addr] = 0.0  # pretend the wait elapsed
+        controller._refresh_stale_device_info()
+        seen.append(controller._info_backoff[addr])
+
+    # Doubles, then holds at the ceiling rather than growing without bound.
+    assert seen == [1.0, 2.0, 4.0, 8.0, 8.0]
+    # Still a candidate: it is never written off the way a cap would.
+    controller._info_next_try[addr] = 0.0
+    assert controller.stale_device_info() == [addr]
+
+    node.stop()
+    controller.terminate()
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_REFRESH_INTERVAL", 1.0)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_a_generation_change_cancels_the_backoff():
+    """A reboot or a flash is exactly when the answer is wanted soonest."""
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(
+        address=0x66,
+        adapter=test_adapter,
+        info_gen=4,
+        answers_device_info=False,
+    )
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    controller._info_last_broadcast = 0.0
+    controller._refresh_stale_device_info()
+    assert controller._info_backoff[addr] > 0
+
+    node.info_gen = 5
+    deadline = time.time() + 3
+    while (
+        time.time() < deadline and controller.status_data[addr].info_gen != 5
+    ):
+        time.sleep(0.01)
+
+    assert addr not in controller._info_backoff
+    assert controller.stale_device_info() == [addr]
+
+    node.stop()
+    controller.terminate()

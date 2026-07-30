@@ -74,9 +74,15 @@ OTA_ACK_TIMEOUT_DEFAULT = 0.7
 # stale bot at once - each answers in its own uplink cell - so this is a
 # refresh rate for the whole fleet, not per device.
 DEVICE_INFO_REFRESH_INTERVAL = 2.0  # s
-# How many broadcasts a bot may ignore before it is written off as firmware
-# that does not implement the message.
-DEVICE_INFO_MAX_ATTEMPTS = 3
+# Ceiling on the retry interval for a device that should answer and has not.
+# There is deliberately no attempt cap: firmware that cannot answer is
+# identified by a zero generation counter and never asked at all, so the only
+# devices reaching this path are ones that should reply - typically busy
+# carrying a running user image. Giving up on those would leave them showing
+# as unknown until something else moved their counter, so they are asked less
+# often instead of not at all. At the ceiling this is 0.03 requests a second
+# for the whole fleet.
+DEVICE_INFO_BACKOFF_MAX = 30.0  # s
 # How long `info` waits for replies when it asks explicitly, and how often it
 # re-asks inside that window. Wide enough to survive a bot whose uplink cell is
 # busy carrying a running user image, which one request inside 1.5 s was not.
@@ -722,14 +728,13 @@ class Controller:
         # Active block transfer, so RX-thread report/finalize frames can be fed
         # into it. None outside a block-OTA transfer.
         self._block_transfer: BlockTransfer | None = None
-        # Device-info cache, keyed by address. `_info_attempts` bounds how
-        # often a bot that never answers is asked again: firmware predating
-        # this message reports generation 0 forever, and without a cap that
-        # would put a broadcast on the downlink every refresh interval for the
-        # life of the session. The counter resets whenever a bot's generation
-        # actually moves, so a re-flashed bot is probed afresh.
+        # Device-info cache, keyed by address.
         self._device_info: dict[str, DeviceInfo] = {}
-        self._info_attempts: dict[str, int] = {}
+        # Per-device retry state: how long to wait before asking again, and
+        # when that wait expires. Both reset the moment a device answers
+        # usefully or its generation moves.
+        self._info_backoff: dict[str, float] = {}
+        self._info_next_try: dict[str, float] = {}
         self._info_gen_seen: dict[str, int] = {}
         self._info_last_broadcast: float = 0.0
         # Addresses an explicit fetch is waiting on a fresh reply for,
@@ -841,7 +846,8 @@ class Controller:
         for addr in inactive:
             self.status_data.pop(addr, None)
             self._device_info.pop(addr, None)
-            self._info_attempts.pop(addr, None)
+            self._info_backoff.pop(addr, None)
+            self._info_next_try.pop(addr, None)
             self._info_gen_seen.pop(addr, None)
             self._info_forced.discard(addr)
 
@@ -853,8 +859,16 @@ class Controller:
         carried. Bots that have ignored the request often enough to look like
         older firmware are excluded.
         """
+        now = time.time()
         stale = []
         for addr, status in list(self.status_data.items()):
+            # Zero means the device never sent a counter at all, which is what
+            # firmware predating this message looks like once the short status
+            # frame is zero-filled. That is a property of the device rather
+            # than a guess from a timeout, so it is never asked - not even when
+            # forced, since it cannot answer.
+            if status.info_gen == 0:
+                continue
             # An explicit ask counts as stale whatever the counter says: some
             # of this block is not inventory. `uptime_s` changes every second,
             # so "the generation has not moved" does not mean "the values are
@@ -867,11 +881,7 @@ class Controller:
                 and cached.info_gen == status.info_gen
             ):
                 continue
-            if (
-                not forced
-                and self._info_attempts.get(addr, 0)
-                >= DEVICE_INFO_MAX_ATTEMPTS
-            ):
+            if not forced and now < self._info_next_try.get(addr, 0.0):
                 continue
             stale.append(addr)
         return stale
@@ -892,7 +902,14 @@ class Controller:
             return
         self._info_last_broadcast = now
         for addr in stale:
-            self._info_attempts[addr] = self._info_attempts.get(addr, 0) + 1
+            # Double the wait each time it goes unanswered, up to the ceiling.
+            backoff = min(
+                self._info_backoff.get(addr, 0.0) * 2
+                or DEVICE_INFO_REFRESH_INTERVAL,
+                DEVICE_INFO_BACKOFF_MAX,
+            )
+            self._info_backoff[addr] = backoff
+            self._info_next_try[addr] = now + backoff
         try:
             self.request_device_info()
         except Exception:
@@ -934,11 +951,11 @@ class Controller:
             if devices
             else set(self.status_data)
         )
-        # An explicit ask re-probes even a bot the background refresh has
-        # written off, so a operator running `info` after re-flashing gets an
-        # answer rather than the previous verdict.
+        # An explicit ask cancels any backoff, so an operator running `info`
+        # does not wait out a retry interval the sweep happened to be in.
         for addr in wanted:
-            self._info_attempts.pop(addr, None)
+            self._info_backoff.pop(addr, None)
+            self._info_next_try.pop(addr, None)
         # Demand a genuinely fresh reply rather than accepting the cached
         # block. The cache stays in place meanwhile, so a device that never
         # answers still renders what was last known instead of nothing.
@@ -1025,8 +1042,9 @@ class Controller:
             if self._info_gen_seen.get(device_addr) != status.info_gen:
                 self._info_gen_seen[device_addr] = status.info_gen
                 # Something changed on this bot, so it is worth asking again
-                # even if it previously ignored us.
-                self._info_attempts.pop(device_addr, None)
+                # immediately even if it had been backing off.
+                self._info_backoff.pop(device_addr, None)
+                self._info_next_try.pop(device_addr, None)
             self.status_data.update({device_addr: status})
         elif packet.payload_type == PayloadType.SWARMIT_DEVICE_INFO_RESP:
             info = DeviceInfo.from_payload(
@@ -1061,7 +1079,8 @@ class Controller:
                 # generation never lines up resets the counter every time and
                 # is asked again forever, which is the opposite of a cap.
                 if info.info_gen == cached_status.info_gen:
-                    self._info_attempts.pop(device_addr, None)
+                    self._info_backoff.pop(device_addr, None)
+                    self._info_next_try.pop(device_addr, None)
         elif packet.payload_type == PayloadType.SWARMIT_OTA_START_ACK:
             # A bootloader speaking the block protocol appends its version; a
             # legacy one sends the empty ack, which parses as version 1.

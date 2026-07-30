@@ -366,6 +366,13 @@ changes between two status frames one second apart. A config commit reboots the
 device, so it moves the counter through the boot rather than as an event of its
 own.
 
+**Zero is reserved.** A device must never report `info_gen == 0`, and skips the
+value on wrap. That makes zero mean exactly one thing to a client: this frame
+was too short to carry the field and was zero-filled, i.e. the firmware predates
+this message. A client uses that rather than a retry count to tell "cannot
+answer" from "did not answer this time" - the first is a property of the device
+and costs no requests at all, the second is worth asking again later.
+
 The device keeps the counter in the same persistent record as everything else it
 reports, and advances it once per boot and once per event. Deriving it from the
 reboot count instead does not work: a boot that finalizes one image would end on

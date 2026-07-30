@@ -184,6 +184,14 @@ static void _record_persist(void) {
 /// the host would cache as current and never correct.
 static void _bump_generation(void) {
     _record.info_gen++;
+    // Zero is reserved on the wire. A host recognises firmware that predates
+    // this message by a status frame too short to carry the counter, which it
+    // zero-fills - so a real device must never report 0, or it would be
+    // mistaken for one that cannot answer. Skipping the value costs one
+    // increment every 256 boots and keeps that discriminator exact.
+    if ((uint8_t)_record.info_gen == 0) {
+        _record.info_gen++;
+    }
     _record_persist();
     __DMB();
     ipc_shared_data.device_info.info_gen = (uint8_t)_record.info_gen;
