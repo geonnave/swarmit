@@ -266,6 +266,13 @@ class PayloadStatus(Payload):
             PayloadFieldMetadata(
                 name="pos_y", disp="pos y", length=4, signed=True
             ),
+            # Crash report. Inventory rather than state - latched once at boot
+            # and unchanged for the rest of the run - so by the split rule that
+            # sends image and firmware versions on request instead, it does not
+            # belong in a 1 Hz frame. It stays because a crash report is wanted
+            # exactly when a bot is unhealthy and barely reachable, and this
+            # frame lands where a 156-byte on-request reply does not. Not for
+            # airtime: a Mari slot costs the same whatever the payload length.
             PayloadFieldMetadata(name="reset_reason", disp="rst", length=4),
             PayloadFieldMetadata(name="fault", disp="fault"),
             PayloadFieldMetadata(name="from_ns", disp="ns"),

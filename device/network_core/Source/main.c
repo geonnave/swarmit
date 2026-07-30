@@ -308,6 +308,17 @@ int main(void) {
             length += sizeof(uint16_t);
             memcpy(&_app_vars.notification_buffer[length], (void *)&ipc_shared_data.current_position, sizeof(position_2d_t));
             length += sizeof(position_2d_t);
+            // The crash report is inventory by the same rule that puts image
+            // and firmware versions in DEVICE_INFO instead: it is latched once
+            // at boot and never changes during a run, so these 22 bytes
+            // describe the previous boot rather than the current state, and
+            // they are most of the frame. It rides the periodic frame anyway
+            // for one reason: a crash report is wanted precisely when a bot is
+            // unhealthy and barely reachable, and a 36-byte frame sent every
+            // second gets through where a 156-byte on-request reply does not.
+            // Airtime is not the reason - the slot is sized for the maximum
+            // packet whatever the payload - so if that reachability argument
+            // stops holding, nothing else keeps this here.
             memcpy(&_app_vars.notification_buffer[length], (void *)&ipc_shared_data.crash_report, sizeof(ipc_crash_report_t));
             length += sizeof(ipc_crash_report_t);
             // Appended last so a host that predates this field still parses

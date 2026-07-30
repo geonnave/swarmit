@@ -97,12 +97,16 @@ message.
 | 30 | `lr` | 4 | stacked LR at fault |
 | 34 | `info_gen` | 1 | device-info generation counter, see `0x8F` |
 
-Bytes 12..33 are the crash report. It is latched once at boot and never
-changes during a run, so most of this frame is inventory rather than state.
-It stays here anyway because a Mari slot is fixed-size: time of arrival is
-computed for the maximum packet, so a 13-byte status and a 35-byte status
-cost the same slot, and evicting it would buy nothing while costing staleness
-on exactly the data you want immediately after a crash.
+Bytes 12..33 are the crash report. It is latched once at boot and never changes
+during a run, so by the access-type rule below it is inventory and belongs in
+`0x8F` - and it is most of this frame.
+
+It stays here for one reason: a crash report is wanted precisely when a device
+is unhealthy and barely reachable, and a 35-byte frame arriving every second
+gets through where a 155-byte on-request reply does not. Airtime is not the
+reason either way, since a Mari slot is sized for the maximum packet whatever
+the payload holds, so moving it would be free. If that reachability argument
+ever stops holding, nothing else keeps it here.
 
 ### `0x83` RESET
 
