@@ -10,8 +10,12 @@ from swarmit.testbed.controller import (
     Chunk,
     Controller,
     ControllerSettings,
+    DeviceInfo,
+    NodeStatus,
     ResetLocation,
     StaleBootloaderError,
+    format_uptime,
+    image_mismatches,
 )
 from swarmit.testbed.logger import setup_logging
 from swarmit.testbed.ota import BlockOTASettings
@@ -880,3 +884,97 @@ def test_device_info_gives_up_on_silent_firmware():
 
     node.stop()
     controller.terminate()
+
+
+def _node_with_image(digest: str, name: str = "", gen: int = 1):
+    """A cached status entry carrying a device-info block, for the
+    majority-mismatch tests. Built directly rather than over the mock
+    transport: what is under test is the comparison, not the wire."""
+    return NodeStatus(
+        info_gen=gen,
+        info=DeviceInfo(info_gen=gen, image_digest=digest, image_name=name),
+    )
+
+
+def test_image_mismatches_all_agree():
+    data = {
+        "AA": _node_with_image("3f9a2c81d4e5b607"),
+        "BB": _node_with_image("3f9a2c81d4e5b607"),
+        "CC": _node_with_image("3f9a2c81d4e5b607"),
+    }
+    majority, odd = image_mismatches(data)
+    assert majority == "3f9a2c81d4e5b607"
+    assert odd == []
+
+
+def test_image_mismatches_flags_the_odd_one_out():
+    data = {
+        "AA": _node_with_image("3f9a2c81d4e5b607", "lakers-sandbox"),
+        "BB": _node_with_image("3f9a2c81d4e5b607", "lakers-sandbox"),
+        "CC": _node_with_image("9e4c1a70d2b83f56", "move-and-blink"),
+    }
+    majority, odd = image_mismatches(data)
+    assert majority == "3f9a2c81d4e5b607"
+    assert [addr for addr, _ in odd] == ["CC"]
+    assert odd[0][1].image_name == "move-and-blink"
+
+
+def test_image_mismatches_compares_digests_not_names():
+    # Two bots claiming the same name over different bytes is exactly why the
+    # digest is the identity and the name is decoration.
+    data = {
+        "AA": _node_with_image("1111111111111111", "app.bin"),
+        "BB": _node_with_image("1111111111111111", "app.bin"),
+        "CC": _node_with_image("2222222222222222", "app.bin"),
+    }
+    majority, odd = image_mismatches(data)
+    assert majority == "1111111111111111"
+    assert [addr for addr, _ in odd] == ["CC"]
+
+
+def test_image_mismatches_ignores_devices_that_have_not_answered():
+    # Unknown is not the same as different: a bot that has not reported device
+    # info must not be counted as disagreeing, or every rollout would show a
+    # spurious callout while the fleet is still being read.
+    data = {
+        "AA": _node_with_image("3f9a2c81d4e5b607"),
+        "BB": _node_with_image("3f9a2c81d4e5b607"),
+        "CC": NodeStatus(),  # never answered
+    }
+    majority, odd = image_mismatches(data)
+    assert majority == "3f9a2c81d4e5b607"
+    assert odd == []
+
+
+def test_image_mismatches_needs_at_least_two_known_devices():
+    # A single bot is trivially its own majority; calling that a match or a
+    # mismatch is meaningless either way.
+    assert image_mismatches({"AA": _node_with_image("aa")}) == ("", [])
+    assert image_mismatches({}) == ("", [])
+
+
+def test_image_label_distinguishes_no_image_from_unknown():
+    # Found on hardware: a bot that has never been flashed over the air
+    # reports a zeroed record, which read as an image whose digest was
+    # sixteen zeros.
+    blank = DeviceInfo(image_digest="0" * 16, image_size=0)
+    assert blank.has_image is False
+    assert blank.image_label == "none"
+
+    real = DeviceInfo(image_digest="d1e1d9804851a855", image_size=9844)
+    assert real.has_image is True
+    assert real.image_label == "d1e1d9804851a855"
+    assert (
+        DeviceInfo(
+            image_digest="d1e1d9804851a855",
+            image_size=9844,
+            image_name="sample.bin",
+        ).image_label
+        == "sample.bin"
+    )
+
+
+def test_format_uptime():
+    assert format_uptime(41) == "41s"
+    assert format_uptime(204) == "3m 24s"
+    assert format_uptime(4324) == "1h 12m 04s"
