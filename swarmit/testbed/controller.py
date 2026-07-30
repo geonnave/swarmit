@@ -736,6 +736,9 @@ class Controller:
         self._info_attempts: dict[str, int] = {}
         self._info_gen_seen: dict[str, int] = {}
         self._info_last_broadcast: float = 0.0
+        # Addresses an explicit fetch is waiting on a fresh reply for,
+        # regardless of the generation counter. Cleared as replies land.
+        self._info_forced: set[str] = set()
         self._known_devices: dict[str, StatusType] = {}
         self._log_event_listeners: list = []
         self._log_listeners_lock = threading.Lock()
@@ -832,16 +835,19 @@ class Controller:
 
     def cleanup_inactive(self, timeout):
         now = time.time()
+        # Snapshot with list(): the RX thread inserts into status_data as
+        # frames arrive, and iterating it live raises RuntimeError.
         inactive = [
             addr
-            for addr, status in self.status_data.items()
+            for addr, status in list(self.status_data.items())
             if now - status.last_updated_at > timeout
         ]
         for addr in inactive:
-            del self.status_data[addr]
+            self.status_data.pop(addr, None)
             self._device_info.pop(addr, None)
             self._info_attempts.pop(addr, None)
             self._info_gen_seen.pop(addr, None)
+            self._info_forced.discard(addr)
 
     def stale_device_info(self) -> list[str]:
         """Devices whose cached device info no longer matches their status.
@@ -853,10 +859,23 @@ class Controller:
         """
         stale = []
         for addr, status in list(self.status_data.items()):
+            # An explicit ask counts as stale whatever the counter says: some
+            # of this block is not inventory. `uptime_s` changes every second,
+            # so "the generation has not moved" does not mean "the values are
+            # still true", and `info` exists to answer as of now.
+            forced = addr in self._info_forced
             cached = self._device_info.get(addr)
-            if cached is not None and cached.info_gen == status.info_gen:
+            if (
+                not forced
+                and cached is not None
+                and cached.info_gen == status.info_gen
+            ):
                 continue
-            if self._info_attempts.get(addr, 0) >= DEVICE_INFO_MAX_ATTEMPTS:
+            if (
+                not forced
+                and self._info_attempts.get(addr, 0)
+                >= DEVICE_INFO_MAX_ATTEMPTS
+            ):
                 continue
             stale.append(addr)
         return stale
@@ -916,6 +935,10 @@ class Controller:
         # answer rather than the previous verdict.
         for addr in wanted:
             self._info_attempts.pop(addr, None)
+        # Demand a genuinely fresh reply rather than accepting the cached
+        # block. The cache stays in place meanwhile, so a device that never
+        # answers still renders what was last known instead of nothing.
+        self._info_forced |= wanted
         deadline = time.time() + timeout
         next_send = 0.0
         while time.time() < deadline:
@@ -934,6 +957,9 @@ class Controller:
                 self.request_device_info(devices)
                 next_send = now + DEVICE_INFO_RESEND_INTERVAL
             time.sleep(0.01)
+        # Drop the demand whether or not it was met, so a device that stayed
+        # silent does not keep the background sweep broadcasting for it.
+        self._info_forced -= wanted
         return {
             addr: info
             for addr, info in self._device_info.items()
@@ -1004,8 +1030,14 @@ class Controller:
             )
             self._device_info[device_addr] = info
             self._info_attempts.pop(device_addr, None)
-            if device_addr in self.status_data:
-                self.status_data[device_addr].info = info
+            self._info_forced.discard(device_addr)
+            # `.get()` rather than `in` then `[]`: this runs on the marilib RX
+            # thread while the cleanup thread deletes inactive entries, and the
+            # two-step form raises KeyError when a device times out between the
+            # check and the write.
+            cached_status = self.status_data.get(device_addr)
+            if cached_status is not None:
+                cached_status.info = info
         elif packet.payload_type == PayloadType.SWARMIT_OTA_START_ACK:
             # A bootloader speaking the block protocol appends its version; a
             # legacy one sends the empty ack, which parses as version 1.

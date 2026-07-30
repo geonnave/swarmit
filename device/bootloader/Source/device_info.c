@@ -31,7 +31,7 @@
 /// address in application core flash, that one at a fixed address in network
 /// core flash, and neither is ever scanned for.
 #define DEVICE_RECORD_MAGIC     (0x5753524DUL)
-#define DEVICE_RECORD_VERSION   (1U)
+#define DEVICE_RECORD_VERSION   (2U)
 
 /// nRF5340 application core RESETREAS bits this mapping cares about.
 #define RR_PIN                  (1UL << 0)
@@ -48,6 +48,13 @@ typedef struct __attribute__((packed)) {
     uint32_t magic;
     uint32_t record_version;
     uint32_t boot_count;
+    /// Monotonic across boots AND events, which is why it is stored rather
+    /// than derived from boot_count. Deriving it collides with its own
+    /// increment: a boot that finalizes one OTA ends on boot_count+1, which is
+    /// exactly what the next boot would start from, so the host sees no change
+    /// across the reset and never refetches. `swarm flash` followed by `swarm
+    /// start` is that sequence, and start resets.
+    uint32_t info_gen;
     uint32_t image_size;
     uint8_t  image_sha256[SWRMT_OTA_SHA256_LENGTH];
     char     image_name[SWRMT_INFO_STRING_LEN];
@@ -138,8 +145,8 @@ static uint8_t _boot_reason(uint32_t resetreas, uint8_t fault) {
     return SWRMT_BOOT_REASON_UNSPECIFIED;
 }
 
-/// Publish the generation counter, and nothing else, after every field it
-/// describes is already in shared memory.
+/// Advance the persisted generation counter and publish it, after every field
+/// it describes is already in shared memory.
 ///
 /// This is the write half of a lock-free handshake with the network core, and
 /// the ordering is the whole of it. The reader samples the counter BEFORE the
@@ -150,8 +157,10 @@ static uint8_t _boot_reason(uint32_t resetreas, uint8_t fault) {
 /// first would produce the opposite - the new counter with stale fields, which
 /// the host would cache as current and never correct.
 static void _bump_generation(void) {
+    _record.info_gen++;
+    _record_persist();
     __DMB();
-    ipc_shared_data.device_info.info_gen++;
+    ipc_shared_data.device_info.info_gen = (uint8_t)_record.info_gen;
 }
 
 /// Mirror the record plus the build-time version into shared memory.
@@ -187,12 +196,6 @@ void device_info_init(uint32_t resetreas, uint8_t fault) {
     }
 
     _record.boot_count++;
-    _record_persist();
-
-    // Seed the generation counter from the boot count so a bot that reboots
-    // always presents a value the controller has not cached, without needing
-    // any state of its own to survive the reset.
-    ipc_shared_data.device_info.info_gen = (uint8_t)_record.boot_count;
     ipc_shared_data.device_info.boot_reason = _boot_reason(resetreas, fault);
     // Until boot-time verification lands, the record is trusted as written:
     // it was only ever stored after a whole-image SHA256 match.
@@ -200,6 +203,10 @@ void device_info_init(uint32_t resetreas, uint8_t fault) {
     ipc_shared_data.device_info.image_result =
         (_record.image_size > 0) ? SWRMT_IMAGE_RESULT_SUCCESS : SWRMT_IMAGE_RESULT_INITIAL;
     _publish();
+    // Advances and persists the counter, so this boot presents a value no
+    // previous boot or event has used. Also writes the bumped boot_count,
+    // which is why there is no separate persist above.
+    _bump_generation();
 }
 
 void device_info_commit_image(void) {
@@ -216,11 +223,11 @@ void device_info_commit_image(void) {
     _copy_string_from_volatile(_record.image_version,
                                ipc_shared_data.ota.pending_version, SWRMT_INFO_STRING_LEN);
 
-    _record_persist();
-
     ipc_shared_data.device_info.image_state = SWRMT_IMAGE_STATE_IDLE;
     ipc_shared_data.device_info.image_result = SWRMT_IMAGE_RESULT_SUCCESS;
     _publish();
+    // Writes the record too, so the new image fields and the counter that
+    // advertises them land in the same erase-write rather than two.
     _bump_generation();
 }
 

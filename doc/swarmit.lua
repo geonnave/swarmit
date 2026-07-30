@@ -230,22 +230,46 @@ local function dissect_status(buf, tree, len)
     return o
 end
 
-local function dissect_device_info(buf, tree)
+--- Decode as many whole fields as the body actually carries.
+---
+--- Every field here sits at a fixed offset, so a short body decodes cleanly up
+--- to wherever it ends. Bailing out instead would contradict the rule the
+--- schema states for every message - tolerate a short body, it means older
+--- firmware - and would show nothing at all for a frame that is mostly
+--- readable.
+local function dissect_device_info(buf, tree, len)
     local o = 0
+    local function room(n) return o + n <= len end
+
+    if not room(1) then return o end
     tree:add_le(f.info_version, buf(o, 1)); o = o + 1
+    if not room(1) then return o end
     tree:add_le(f.info_gen, buf(o, 1)); o = o + 1
+    if not room(4) then return o end
     tree:add_le(f.boot_count, buf(o, 4)); o = o + 4
+    if not room(4) then return o end
     tree:add_le(f.uptime_s, buf(o, 4)); o = o + 4
+    if not room(1) then return o end
     tree:add_le(f.boot_reason, buf(o, 1)); o = o + 1
+    if not room(INFO_STRING_LEN) then return o end
     o = add_string_field(tree, f.bl_version, buf, o, INFO_STRING_LEN)
+    if not room(INFO_STRING_LEN) then return o end
     o = add_string_field(tree, f.net_version, buf, o, INFO_STRING_LEN)
+    if not room(1) then return o end
     tree:add_le(f.image_state, buf(o, 1)); o = o + 1
+    if not room(1) then return o end
     tree:add_le(f.image_result, buf(o, 1)); o = o + 1
+    if not room(4) then return o end
     tree:add_le(f.image_size, buf(o, 4)); o = o + 4
+    if not room(IMAGE_DIGEST_LEN) then return o end
     tree:add(f.image_digest, buf(o, IMAGE_DIGEST_LEN)); o = o + IMAGE_DIGEST_LEN
+    if not room(INFO_STRING_LEN) then return o end
     o = add_string_field(tree, f.image_name, buf, o, INFO_STRING_LEN)
+    if not room(INFO_STRING_LEN) then return o end
     o = add_string_field(tree, f.image_version, buf, o, INFO_STRING_LEN)
+    if not room(1) then return o end
     tree:add_le(f.lh2_count, buf(o, 1)); o = o + 1
+    if not room(1) then return o end
     local flags = tree:add_le(f.lh2_flags, buf(o, 1))
     flags:add_le(f.lh2_valid, buf(o, 1))
     flags:add_le(f.lh2_from_flash, buf(o, 1))
@@ -378,11 +402,12 @@ local function dissect_message(buf, pinfo, root)
         pinfo.cols.info = name .. " -> " .. (MSG[body(0, 1):uint()] or "?")
         consumed = 2
     elseif msg_type == 0x8F then
+        consumed = dissect_device_info(body, tree, body_len)
         if body_len < 155 then
+            tree:append_text(" [truncated: older schema or a short frame]")
             tree:add_proto_expert_info(ef_short)
             return len
         end
-        consumed = dissect_device_info(body, tree)
     elseif msg_type == 0xA0 and body_len >= 1 then
         local count = body(0, 1):le_uint()
         tree:add_le(f.count, body(0, 1))

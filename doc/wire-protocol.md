@@ -61,7 +61,7 @@ and `D->H` for device to host.
 | `0x86` | `OTA_START_ACK` | D->H | 1 B | erase done, protocol version |
 | `0x87` | `OTA_CHUNK_ACK` | - | - | **retired**, ID reserved |
 | `0x88` | `EVENT_GPIO` | D->H | 7 B | a GPIO transition, timestamped |
-| `0x89` | `EVENT_LOG` | D->H | 5..133 B | a log line or an LH2 sample |
+| `0x89` | `EVENT_LOG` | D->H | 5..132 B | a log line or an LH2 sample |
 | `0x8A` | `OTA_BLOCK_REPORT_REQ` | H->D | 5 B | which chunks of a block landed? |
 | `0x8B` | `OTA_BLOCK_REPORT_RESP` | D->H | 9 B | the received-chunk bitmap |
 | `0x8C` | `OTA_FINALIZE` | H->D | 32 B | verify the whole image |
@@ -86,8 +86,8 @@ message.
 | 0 | `device` | 1 | 0 unknown, 1 DotBotV3, 2 DotBotV2, 3 nRF5340DK, 4 nRF52840DK |
 | 1 | `status` | 1 | 0 Bootloader, 1 Running, 2 Stopping, 3 Resetting, 4 Programming |
 | 2 | `battery` | 2 | mV |
-| 4 | `pos_x` | 4 | signed, mm |
-| 8 | `pos_y` | 4 | signed, mm |
+| 4 | `pos_x` | 4 | mm; the device writes it unsigned |
+| 8 | `pos_y` | 4 | mm; the device writes it unsigned |
 | 12 | `reset_reason` | 4 | nRF5340 app-core `RESETREAS` as latched at boot |
 | 16 | `fault` | 1 | 0 none, 1 hard fault, 2 secure fault |
 | 17 | `from_ns` | 1 | 1 if the non-secure user image faulted |
@@ -357,10 +357,18 @@ corrects itself on the next status frame. The opposite order would pair a new
 counter with stale fields, which a client would cache as current and never
 correct.
 
-`info_gen` is one byte and wraps at 256. It changes only on boot, OTA finalize
-and config commit, and any difference means "refetch", so a wrap back to the
-same value needs exactly 256 changes between two status frames one second
-apart.
+`info_gen` is one byte on the wire and wraps at 256. Any difference means
+"refetch", so a wrap back to the same cached value would need exactly 256
+changes between two status frames one second apart. A config commit reboots the
+device, so it moves the counter through the boot rather than as an event of its
+own.
+
+The device keeps the counter in the same persistent record as everything else it
+reports, and advances it once per boot and once per event. Deriving it from the
+reboot count instead does not work: a boot that finalizes one image would end on
+`boot_count + 1`, which is exactly where the next boot would start, so a client
+sees no change across the reset and never refetches. Flashing a device and then
+starting it is that sequence.
 
 **On client restart, resync - never replay.** A fresh client has no cached
 generation for any device, so the first status frame from each triggers exactly

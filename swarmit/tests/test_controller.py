@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from unittest.mock import PropertyMock, patch
 
@@ -14,6 +15,7 @@ from swarmit.testbed.controller import (
     NodeStatus,
     ResetLocation,
     StaleBootloaderError,
+    StartOtaData,
     format_uptime,
     image_mismatches,
 )
@@ -978,3 +980,80 @@ def test_format_uptime():
     assert format_uptime(41) == "41s"
     assert format_uptime(204) == "3m 24s"
     assert format_uptime(4324) == "1h 12m 04s"
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_TIMEOUT", 1.0)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_explicit_fetch_asks_even_when_the_generation_matches():
+    """`info` must re-read, not trust the cache.
+
+    Not everything in the block is inventory: `uptime_s` moves every second,
+    so an unchanged generation counter does not mean the values are still
+    true. An explicit fetch that short-circuits on a fresh-looking cache
+    renders the uptime sampled at the previous fetch.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(address=0x11, adapter=test_adapter, info_gen=7)
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    controller.fetch_device_info([addr])
+    first = node.device_info_requests
+    assert first >= 1
+    assert controller.status_data[addr].info is not None
+
+    # Generation has not moved, so the background sweep would correctly stay
+    # quiet - but an explicit ask must still go out.
+    assert controller.stale_device_info() == []
+    controller.fetch_device_info([addr])
+    assert node.device_info_requests > first
+    # And the demand is released, so the sweep does not keep broadcasting.
+    assert controller._info_forced == set()
+
+    node.stop()
+    controller.terminate()
+
+
+def test_device_info_reply_survives_a_concurrent_timeout():
+    """The RX thread must not raise when a device times out mid-callback.
+
+    `cleanup_inactive` deletes entries from another thread; a check-then-act
+    on status_data raises KeyError in that window.
+    """
+    from unittest.mock import MagicMock
+
+    from dotbot_utils.protocol import Packet
+
+    from swarmit.testbed.protocol import PayloadDeviceInfo
+
+    controller = Controller.__new__(Controller)
+    controller.logger = MagicMock()
+    controller.settings = ControllerSettings()
+    controller.status_data = {}
+    controller._device_info = {}
+    controller._info_attempts = {}
+    controller._info_gen_seen = {}
+    controller._info_forced = set()
+    controller._block_transfer = None
+    controller.start_ota_data = StartOtaData()
+    controller._ota_versions = {}
+    controller._log_event_listeners = []
+    controller._log_listeners_lock = threading.Lock()
+
+    header = MagicMock()
+    header.source = 0x22
+    packet = Packet.from_payload(PayloadDeviceInfo(info_gen=3))
+    # status_data is deliberately empty: the device timed out between the
+    # request going out and this reply arriving.
+    controller.on_frame_received(header, packet)
+
+    assert controller._device_info["00000022"].info_gen == 3
