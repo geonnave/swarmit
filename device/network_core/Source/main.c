@@ -506,7 +506,6 @@ int main(void) {
                     info.info_gen = ipc_shared_data.device_info.info_gen;
                     info.boot_count = ipc_shared_data.device_info.boot_count;
                     info.uptime_s = _app_vars.uptime_s;
-                    info.boot_reason = ipc_shared_data.device_info.boot_reason;
                     info.image_state = ipc_shared_data.device_info.image_state;
                     info.image_result = ipc_shared_data.device_info.image_result;
                     info.image_size = ipc_shared_data.device_info.image_size;

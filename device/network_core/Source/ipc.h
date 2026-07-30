@@ -92,7 +92,6 @@ typedef struct {
     char     bl_version[SWRMT_INFO_STRING_LEN];     ///< app core writes
     char     net_version[SWRMT_INFO_STRING_LEN];    ///< net core writes
     uint8_t  info_gen;                              ///< bumped on boot and on OTA finalize; the host refetches on any change
-    uint8_t  boot_reason;                           ///< swrmt_boot_reason_t
     uint8_t  image_state;                           ///< swrmt_image_state_t
     uint8_t  image_result;                          ///< swrmt_image_result_t
     uint8_t  lh2_homography_count;                  ///< net core writes

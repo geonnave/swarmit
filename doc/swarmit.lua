@@ -86,17 +86,6 @@ local IMAGE_RESULT = {
     [8] = "UpdateFailed",
 }
 
--- Matter BootReasonEnum, cluster 0x0033 attribute 0x0004.
-local BOOT_REASON = {
-    [0] = "Unspecified",
-    [1] = "PowerOnReboot",
-    [2] = "BrownOutReset",
-    [3] = "SoftwareWatchdogReset",
-    [4] = "HardwareWatchdogReset",
-    [5] = "SoftwareUpdateCompleted",
-    [6] = "SoftwareReset",
-}
-
 local INFO_STRING_LEN = 32
 local IMAGE_DIGEST_LEN = 8
 local OTA_CHUNK_SIZE = 128
@@ -149,7 +138,6 @@ f.req_flags = ProtoField.uint8("swarmit.req_flags", "Flags (reserved)", base.HEX
 f.info_version = ProtoField.uint8("swarmit.info_version", "Info schema version", base.DEC)
 f.boot_count = ProtoField.uint32("swarmit.boot_count", "Boot count", base.DEC)
 f.uptime_s = ProtoField.uint32("swarmit.uptime_s", "Uptime", base.DEC, nil, nil, "s")
-f.boot_reason = ProtoField.uint8("swarmit.boot_reason", "Boot reason", base.DEC, BOOT_REASON)
 f.bl_version = ProtoField.stringz("swarmit.bl_version", "Bootloader version")
 f.net_version = ProtoField.stringz("swarmit.net_version", "Network core version")
 f.image_state = ProtoField.uint8("swarmit.image_state", "Image state", base.DEC, IMAGE_STATE)
@@ -249,8 +237,6 @@ local function dissect_device_info(buf, tree, len)
     tree:add_le(f.boot_count, buf(o, 4)); o = o + 4
     if not room(4) then return o end
     tree:add_le(f.uptime_s, buf(o, 4)); o = o + 4
-    if not room(1) then return o end
-    tree:add_le(f.boot_reason, buf(o, 1)); o = o + 1
     if not room(INFO_STRING_LEN) then return o end
     o = add_string_field(tree, f.bl_version, buf, o, INFO_STRING_LEN)
     if not room(INFO_STRING_LEN) then return o end
@@ -403,7 +389,7 @@ local function dissect_message(buf, pinfo, root)
         consumed = 2
     elseif msg_type == 0x8F then
         consumed = dissect_device_info(body, tree, body_len)
-        if body_len < 155 then
+        if body_len < 154 then
             tree:append_text(" [truncated: older schema or a short frame]")
             tree:add_proto_expert_info(ef_short)
             return len

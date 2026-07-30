@@ -257,7 +257,6 @@ class SwarmitNode(threading.Thread):
                         info_gen=self.info_gen,
                         boot_count=self.boot_count,
                         uptime_s=42,
-                        boot_reason=1,
                         bl_version=encode_string_field("0.9.0-test"),
                         net_version=encode_string_field("0.9.0-test"),
                         image_size=self.ota_expected_bytes_received,

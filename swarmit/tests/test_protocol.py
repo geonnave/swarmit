@@ -11,6 +11,7 @@ from swarmit.testbed.protocol import (
     PayloadRequestMessage,
     PayloadStatus,
     PayloadType,
+    boot_reason,
     decode_cfsr,
     decode_reset_reason,
     decode_sfsr,
@@ -121,9 +122,9 @@ def test_payload_status_pre_generation_frame():
 
 
 def test_device_info_matches_firmware_wire_size():
-    # 155 bytes is the contract the firmware asserts on its own struct. If
+    # 154 bytes is the contract the firmware asserts on its own struct. If
     # this changes, swrmt_device_info_pkt_t must change with it.
-    assert PayloadDeviceInfo().size == 155
+    assert PayloadDeviceInfo().size == 154
 
 
 def test_payload_device_info_round_trip():
@@ -132,7 +133,6 @@ def test_payload_device_info_round_trip():
         info_gen=42,
         boot_count=37,
         uptime_s=4324,
-        boot_reason=1,
         bl_version=encode_string_field("0.9.0-3-g29e2704"),
         net_version=encode_string_field("0.9.0-3-g29e2704"),
         image_state=0,
@@ -225,3 +225,32 @@ def test_payload_request_message_defaults_to_device_info():
 
 def test_image_digest_length_matches_firmware():
     assert IMAGE_DIGEST_LEN == 8
+
+
+@pytest.mark.parametrize(
+    "reset_reason,fault,expected",
+    [
+        (0, 0, "PowerOnReboot"),
+        (1 << 0, 0, "PowerOnReboot"),
+        (1 << 1, 0, "HardwareWatchdogReset"),  # WDT0: the crash deadman
+        (1 << 25, 0, "SoftwareReset"),  # WDT1: only the stop command
+        (1 << 3, 0, "SoftwareReset"),
+        # A cabled flash sets ctrl-ap + SREQ + LOCKUP at once. Testing LOCKUP
+        # first reported a freshly programmed device as watchdog-reset, which
+        # is what the bench caught.
+        (0x1C, 0, "SoftwareReset"),
+        # A bare lockup: Matter has no value for it, and claiming a watchdog
+        # fired when none did is worse than admitting the enum cannot say.
+        (1 << 4, 0, "Unspecified"),
+        # A latched fault wins over everything.
+        (1 << 3, 1, "HardwareWatchdogReset"),
+    ],
+)
+def test_boot_reason_mapping(reset_reason, fault, expected):
+    assert boot_reason(reset_reason, fault).name == expected
+
+
+def test_boot_reason_is_derived_not_transmitted():
+    # The device does not send it: everything the mapping needs already rides
+    # the status frame, so a fix is a host change rather than a reflash.
+    assert not hasattr(PayloadDeviceInfo(), "boot_reason")

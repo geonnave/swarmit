@@ -33,18 +33,32 @@
 #define DEVICE_RECORD_MAGIC     (0x5753524DUL)
 #define DEVICE_RECORD_VERSION   (2U)
 
-/// nRF5340 application core RESETREAS bits this mapping cares about.
-#define RR_PIN                  (1UL << 0)
-#define RR_WDT0                 (1UL << 1)   ///< crash deadman the running app must pet
-#define RR_SREQ                 (1UL << 3)
-#define RR_LOCKUP               (1UL << 4)
-#define RR_WDT1                 (1UL << 25)  ///< only the stop command starts WDT1
+/// The page holds an array of fixed-size slots rather than one record at a
+/// fixed address, and each write appends to the next free slot. Only when the
+/// last slot is used does the page get erased.
+///
+/// This is what makes the wear acceptable. Rewriting one record in place costs
+/// an erase per boot, and an experiment start and an experiment stop are each a
+/// boot, so the page wears at the rate the testbed is *used*: at 40 boots a day
+/// the 10k erase endurance (nRF5340 PS v1.6, nENDURANCE) is spent in eight
+/// months. Appending divides that by the slot count, which puts it past twenty
+/// years at the same rate.
+///
+/// It also makes the update atomic, which rewriting in place is not: the magic
+/// word is written last, so a power cut mid-write leaves the new slot's magic
+/// erased and therefore invalid, and the previous slot is still the newest
+/// valid one. Rewriting in place has an ~88 ms window (tERASEPAGE) where a
+/// power cut destroys the record outright.
+#define DEVICE_RECORD_SLOT_SIZE (128U)
+#define DEVICE_RECORD_SLOTS     (FLASH_PAGE_SIZE / DEVICE_RECORD_SLOT_SIZE)
 
 //=========================== variables ========================================
 
-/// Persisted verbatim in DEVICE_RECORD_PAGE. Packed and word-sized so the
-/// NVMC word writes land where this layout says they do.
+/// Persisted verbatim in a slot of DEVICE_RECORD_PAGE. Packed and word-sized so
+/// the NVMC word writes land where this layout says they do.
 typedef struct __attribute__((packed)) {
+    /// Written LAST and checked FIRST, which is what makes an append atomic:
+    /// a slot whose body landed but whose magic did not reads as erased.
     uint32_t magic;
     uint32_t record_version;
     uint32_t boot_count;
@@ -59,18 +73,27 @@ typedef struct __attribute__((packed)) {
     uint8_t  image_sha256[SWRMT_OTA_SHA256_LENGTH];
     char     image_name[SWRMT_INFO_STRING_LEN];
     char     image_version[SWRMT_INFO_STRING_LEN];
+    /// Pads the record out to the slot size. Adding a field here costs no
+    /// change to the slot layout, and therefore no migration.
+    uint8_t  reserved[12];
 } swrmt_device_record_t;
 
 // NVMC writes whole 32-bit words and faults on an unaligned access, so the
-// record has to be a whole number of words.
+// record has to be a whole number of words, and exactly one slot so the slot
+// index is all the addressing needed.
 _Static_assert(sizeof(swrmt_device_record_t) % 4 == 0,
                "device record must be a whole number of 32-bit words");
-_Static_assert(sizeof(swrmt_device_record_t) <= FLASH_PAGE_SIZE,
-               "device record must fit in its reserved page");
+_Static_assert(sizeof(swrmt_device_record_t) == DEVICE_RECORD_SLOT_SIZE,
+               "device record must fill exactly one slot");
+_Static_assert(DEVICE_RECORD_SLOTS * DEVICE_RECORD_SLOT_SIZE <= FLASH_PAGE_SIZE,
+               "the slots must fit in the reserved page");
 
 extern volatile __attribute__((section(".shared_data"))) ipc_shared_data_t ipc_shared_data;
 
 static swrmt_device_record_t _record = { 0 };
+
+/// Slot holding the newest valid record; -1 when the page has none.
+static int32_t _slot_index = -1;
 
 //=========================== private ==========================================
 
@@ -99,50 +122,53 @@ static void _copy_string_from_volatile(char *dst, const volatile char *src, size
     }
 }
 
-/// One page erase plus one write. This runs on every boot, and an experiment
-/// start and an experiment stop are each a boot, so the page wears at the rate
-/// the testbed is used rather than the rate images change: roughly 3.6k cycles
-/// a year at ten boots a day, against a 10k endurance spec. That is the cost of
-/// having the reboot count survive a power cycle. If boot rates rise enough to
-/// matter, the escape is to keep boot_count in .non_init RAM the way
-/// crash_latch does and write flash only when the image changes, which trades
-/// the power-cycle count for the wear.
-static void _record_persist(void) {
-    nvmc_page_erase_secure(DEVICE_RECORD_PAGE);
-    nvmc_write_secure((const uint32_t *)DEVICE_RECORD_ADDRESS, &_record, sizeof(_record));
+static const swrmt_device_record_t *_slot_at(uint32_t index) {
+    return (const swrmt_device_record_t *)(DEVICE_RECORD_ADDRESS +
+                                           index * DEVICE_RECORD_SLOT_SIZE);
 }
 
-/// Matter BootReasonEnum (cluster 0x0033 attribute 0x0004) from RESETREAS plus
-/// the latched fault. The enum is deliberately coarse - the exact register
-/// value and the fault snapshot still travel in the status frame's crash
-/// report, which stays the authoritative post-mortem.
-static uint8_t _boot_reason(uint32_t resetreas, uint8_t fault) {
-    // A crash wins over everything: the fault handler latches and then hangs
-    // until WDT0 resets the chip, so both bits can be set at once. WDT0 is a
-    // real watchdog peripheral, so this is the one case that honestly maps to
-    // the watchdog values.
-    if (fault || (resetreas & RR_WDT0)) {
-        return SWRMT_BOOT_REASON_HW_WATCHDOG;
+/// Highest slot index holding a valid record, or -1 if the page holds none.
+///
+/// Highest rather than a sequence-number search because writes only ever move
+/// forward through the page and the page is erased whole, so the last valid
+/// slot is by construction the newest.
+static int32_t _find_newest_slot(void) {
+    int32_t newest = -1;
+    for (uint32_t i = 0; i < DEVICE_RECORD_SLOTS; i++) {
+        const swrmt_device_record_t *slot = _slot_at(i);
+        if (slot->magic == DEVICE_RECORD_MAGIC &&
+            slot->record_version == DEVICE_RECORD_VERSION) {
+            newest = (int32_t)i;
+        }
     }
-    if (resetreas & RR_WDT1) {
-        // WDT1 is started by the stop command's DPPI path and by nothing else,
-        // so this is a commanded reset rather than a watchdog failure.
-        return SWRMT_BOOT_REASON_SW_RESET;
+    return newest;
+}
+
+/// Append the in-RAM record to the next free slot, erasing only when full.
+static void _record_persist(void) {
+
+    if (_slot_index < 0 || _slot_index + 1 >= (int32_t)DEVICE_RECORD_SLOTS) {
+        // Nothing usable in the page, or the last slot is taken. Erasing when
+        // nothing is valid also covers a page holding garbage, which cannot be
+        // written into without an erase first.
+        nvmc_page_erase_secure(DEVICE_RECORD_PAGE);
+        _slot_index = 0;
+    } else {
+        _slot_index++;
     }
-    // Checked before LOCKUP because a cabled flash sets ctrl-ap, SREQ and
-    // LOCKUP together, and of those a commanded reset is what actually
-    // happened. Reporting a freshly programmed device as watchdog-reset tells
-    // an operator something went wrong when nothing did.
-    if (resetreas & RR_SREQ) {
-        return SWRMT_BOOT_REASON_SW_RESET;
-    }
-    if (resetreas == 0 || (resetreas & RR_PIN)) {
-        return SWRMT_BOOT_REASON_POWER_ON;
-    }
-    // Matter has no value for a CPU lockup, and no watchdog fired, so claiming
-    // one would be worse than admitting the enum cannot express this. The raw
-    // RESETREAS in the status frame stays the authoritative answer.
-    return SWRMT_BOOT_REASON_UNSPECIFIED;
+
+    const uint32_t base = DEVICE_RECORD_ADDRESS + (uint32_t)_slot_index * DEVICE_RECORD_SLOT_SIZE;
+    const uint8_t *bytes = (const uint8_t *)&_record;
+
+    // Body first, magic last. Both halves are word-aligned and word-sized, and
+    // the ordering is the atomicity: a power cut between them leaves a slot
+    // whose magic is still erased, so the next boot ignores it and keeps
+    // reading the previous slot.
+    nvmc_write_secure((const uint32_t *)(base + sizeof(uint32_t)),
+                      bytes + sizeof(uint32_t),
+                      sizeof(_record) - sizeof(uint32_t));
+    __DSB();
+    nvmc_write_secure((const uint32_t *)base, bytes, sizeof(uint32_t));
 }
 
 /// Advance the persisted generation counter and publish it, after every field
@@ -180,12 +206,12 @@ static void _publish(void) {
 
 //=========================== public ===========================================
 
-void device_info_init(uint32_t resetreas, uint8_t fault) {
+void device_info_init(void) {
 
-    const swrmt_device_record_t *stored = (const swrmt_device_record_t *)DEVICE_RECORD_ADDRESS;
+    _slot_index = _find_newest_slot();
 
-    if (stored->magic == DEVICE_RECORD_MAGIC && stored->record_version == DEVICE_RECORD_VERSION) {
-        memcpy(&_record, stored, sizeof(_record));
+    if (_slot_index >= 0) {
+        memcpy(&_record, _slot_at((uint32_t)_slot_index), sizeof(_record));
     } else {
         // Virgin flash reads back as all 0xFF, and so does a record written by
         // a future schema we cannot interpret. Either way, start clean rather
@@ -196,7 +222,6 @@ void device_info_init(uint32_t resetreas, uint8_t fault) {
     }
 
     _record.boot_count++;
-    ipc_shared_data.device_info.boot_reason = _boot_reason(resetreas, fault);
     // Until boot-time verification lands, the record is trusted as written:
     // it was only ever stored after a whole-image SHA256 match.
     ipc_shared_data.device_info.image_state = SWRMT_IMAGE_STATE_IDLE;

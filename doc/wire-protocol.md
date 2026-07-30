@@ -67,7 +67,7 @@ and `D->H` for device to host.
 | `0x8C` | `OTA_FINALIZE` | H->D | 32 B | verify the whole image |
 | `0x8D` | `OTA_FINALIZE_RESP` | D->H | 1 B | did the image hash match? |
 | `0x8E` | `REQUEST_MESSAGE` | H->D | 2 B | emit one message, once |
-| `0x8F` | `DEVICE_INFO_RESP` | D->H | 155 B | what this device is running |
+| `0x8F` | `DEVICE_INFO_RESP` | D->H | 154 B | what this device is running |
 | `0xA0` | `MESSAGE` | H->D | 1..N B | opaque text to the user image |
 | `0xA1` | `LH2_CALIBRATION` | H->D | 44 B | one homography matrix |
 | `0xA2` | `LH2_CAPTURE` | H->D | 0 B | capture one raw LH2 sample |
@@ -103,7 +103,7 @@ during a run, so by the access-type rule below it is inventory and belongs in
 
 It stays here for one reason: a crash report is wanted precisely when a device
 is unhealthy and barely reachable, and a 35-byte frame arriving every second
-gets through where a 155-byte on-request reply does not. Airtime is not the
+gets through where a 154-byte on-request reply does not. Airtime is not the
 reason either way, since a Mari slot is sized for the maximum packet whatever
 the payload holds, so moving it would be free. If that reachability argument
 ever stops holding, nothing else keeps it here.
@@ -234,19 +234,18 @@ host; see "The generation counter" below for when to read it again.
 | 1 | `info_gen` | 1 | echoes the counter in `0x80` |
 | 2 | `boot_count` | 4 | reboots since the record was created |
 | 6 | `uptime_s` | 4 | seconds since this boot |
-| 10 | `boot_reason` | 1 | see below |
-| 11 | `bl_version` | 32 | bootloader build stamp, `git describe --always --dirty` |
-| 43 | `net_version` | 32 | network-core build stamp, same form |
-| 75 | `image_state` | 1 | see below |
-| 76 | `image_result` | 1 | see below |
-| 77 | `image_size` | 4 | bytes, as flashed |
-| 81 | `image_digest` | 8 | first 8 bytes of the image SHA256 |
-| 89 | `image_name` | 32 | display-only, NUL-padded |
-| 121 | `image_version` | 32 | display-only, NUL-padded |
-| 153 | `lh2_homography_count` | 1 | 0 means uncalibrated |
-| 154 | `lh2_flags` | 1 | bit 0 calibration valid, bit 1 loaded from flash |
+| 10 | `bl_version` | 32 | bootloader build stamp, `git describe --always --dirty` |
+| 42 | `net_version` | 32 | network-core build stamp, same form |
+| 74 | `image_state` | 1 | see below |
+| 75 | `image_result` | 1 | see below |
+| 76 | `image_size` | 4 | bytes, as flashed |
+| 80 | `image_digest` | 8 | first 8 bytes of the image SHA256 |
+| 88 | `image_name` | 32 | display-only, NUL-padded |
+| 120 | `image_version` | 32 | display-only, NUL-padded |
+| 152 | `lh2_homography_count` | 1 | 0 means uncalibrated |
+| 153 | `lh2_flags` | 1 | bit 0 calibration valid, bit 1 loaded from flash |
 
-Total 155 bytes, leaving 78 spare in a 234-byte payload.
+Total 154 bytes, leaving 80 spare in a 234-byte payload.
 
 **`image_digest` is the identity. `image_name` and `image_version` are
 decoration.** A client compares digests; it must never make a decision on the
@@ -270,7 +269,6 @@ field mapping rather than a redesign:
 | `image_result` | LwM2M Object 5 resource 5, *Update Result* |
 | `image_name` | LwM2M Object 5 resource 6, *PkgName* |
 | `image_version` | LwM2M Object 5 resource 7, *PkgVersion* |
-| `boot_reason` | Matter *BootReasonEnum*, cluster 0x0033 attribute 0x0004 |
 | `boot_count` | Matter *RebootCount*, 0x0033 attribute 0x0001 |
 | `uptime_s` | Matter *UpTime*, 0x0033 attribute 0x0002 |
 | 32-byte string cap | Matter, Zigbee and Thread identity strings all cap at 32 |
@@ -289,11 +287,16 @@ Two deviations from those definitions, both deliberate:
 flash, 4 Connection lost, 5 Integrity check failure, 8 Firmware update
 failed. Only these are produced.
 
-`boot_reason` (Matter *BootReasonEnum*): 0 Unspecified, 1 PowerOnReboot,
-2 BrownOutReset, 3 SoftwareWatchdogReset, 4 HardwareWatchdogReset,
-5 SoftwareUpdateCompleted, 6 SoftwareReset. This is a coarse view; the exact
-`RESETREAS` value and the fault snapshot travel in `0x80` and remain the
-authoritative post-mortem.
+There is deliberately **no boot-reason field**. Matter's *BootReasonEnum* is a
+useful vocabulary, but everything needed to compute it - `reset_reason` and
+`fault` - already rides `0x80`, so sending a device-side mapping as well would
+put one fact on the wire twice and make correcting the mapping a firmware
+flash. A client that wants the Matter value derives it: a latched fault or WDT0
+is `HardwareWatchdogReset`, WDT1 or SREQ is `SoftwareReset`, zero or PIN is
+`PowerOnReboot`, and anything else - a bare CPU lockup, which the enum has no
+value for - is `Unspecified`. Order matters there: a cabled flash sets ctrl-ap,
+SREQ and LOCKUP together, and reporting a freshly programmed device as
+watchdog-reset says something went wrong when nothing did.
 
 Deliberately **not** carried, so nobody adds them by reflex:
 

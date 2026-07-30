@@ -330,7 +330,7 @@ int main(void) {
     }
     crash_latch.magic = 0;
 
-    device_info_init(resetreas, ipc_shared_data.crash_report.fault);
+    device_info_init();
 
     // Start the network core
     release_network_core();

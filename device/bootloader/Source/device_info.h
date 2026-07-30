@@ -23,10 +23,8 @@
  * once, before the network core is released, so the first status frame already
  * carries a settled generation counter.
  *
- * @param[in] resetreas  RESETREAS as read at boot
- * @param[in] fault      fault latched by the previous run (0 if none)
  */
-void device_info_init(uint32_t resetreas, uint8_t fault);
+void device_info_init(void);
 
 /**
  * @brief Record the image that just passed its whole-image SHA256 check.

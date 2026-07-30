@@ -51,19 +51,6 @@ typedef enum {
     SWRMT_IMAGE_RESULT_UPDATE_FAILED = 8,
 } swrmt_image_result_t;
 
-/// Why the device last booted. Matter BootReasonEnum verbatim (General
-/// Diagnostics cluster 0x0033, attribute 0x0004), mapped from RESETREAS plus
-/// the fault the previous run latched.
-typedef enum {
-    SWRMT_BOOT_REASON_UNSPECIFIED = 0,
-    SWRMT_BOOT_REASON_POWER_ON = 1,
-    SWRMT_BOOT_REASON_BROWN_OUT = 2,
-    SWRMT_BOOT_REASON_SW_WATCHDOG = 3,
-    SWRMT_BOOT_REASON_HW_WATCHDOG = 4,
-    SWRMT_BOOT_REASON_SW_UPDATE = 5,
-    SWRMT_BOOT_REASON_SW_RESET = 6,
-} swrmt_boot_reason_t;
-
 /// Bits of swrmt_device_info_pkt_t.lh2_flags.
 #define SWRMT_LH2_FLAG_VALID        (1U << 0)   // a usable homography set is loaded
 #define SWRMT_LH2_FLAG_FROM_FLASH   (1U << 1)   // it came from the provisioned config page
@@ -169,7 +156,6 @@ typedef struct __attribute__((packed)) {
     uint8_t  info_gen;                              ///< echoes the status counter (detects an in-flight change)
     uint32_t boot_count;                            ///< Matter RebootCount, widened to u32 (a bot reboots per experiment)
     uint32_t uptime_s;                              ///< Matter UpTime, narrowed to u32 (136 years)
-    uint8_t  boot_reason;                           ///< swrmt_boot_reason_t
     char     bl_version[SWRMT_INFO_STRING_LEN];     ///< bootloader   git describe --always --dirty
     char     net_version[SWRMT_INFO_STRING_LEN];    ///< network core git describe --always --dirty
     uint8_t  image_state;                           ///< swrmt_image_state_t
@@ -182,7 +168,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  lh2_flags;                             ///< SWRMT_LH2_FLAG_*
 } swrmt_device_info_pkt_t;
 
-_Static_assert(sizeof(swrmt_device_info_pkt_t) == 155,
+_Static_assert(sizeof(swrmt_device_info_pkt_t) == 154,
                "swrmt_device_info_pkt_t is a wire format; its size is part of the contract");
 
 typedef struct __attribute__((packed)) {

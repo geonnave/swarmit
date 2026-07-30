@@ -219,7 +219,13 @@ class ImageResult(Enum):
 
 
 class BootReason(Enum):
-    """Why the device last booted. Matter BootReasonEnum (cluster 0x0033)."""
+    """Why the device last booted. Matter BootReasonEnum (cluster 0x0033).
+
+    Derived on the host by `boot_reason()` rather than sent by the device:
+    everything it needs - RESETREAS and the latched fault - already rides the
+    status frame, so putting the mapping on the wire would duplicate a fact and
+    make correcting it a firmware flash.
+    """
 
     Unspecified = 0
     PowerOnReboot = 1
@@ -228,6 +234,41 @@ class BootReason(Enum):
     HardwareWatchdogReset = 4
     SoftwareUpdateCompleted = 5
     SoftwareReset = 6
+
+
+# RESETREAS bits with a swarmit-specific meaning. WDT0 is the crash deadman a
+# running app must pet; WDT1 is started by the stop command's DPPI path and by
+# nothing else.
+_RR_PIN = 1 << 0
+_RR_WDT0 = 1 << 1
+_RR_SREQ = 1 << 3
+_RR_LOCKUP = 1 << 4
+_RR_WDT1 = 1 << 25
+
+
+def boot_reason(reset_reason: int, fault: int) -> BootReason:
+    """Map RESETREAS + the latched fault onto Matter's BootReasonEnum.
+
+    Coarse by construction - the enum has no value for a CPU lockup, and the
+    raw register in the status frame stays the authoritative answer. Order
+    matters: a cabled flash sets ctrl-ap, SREQ and LOCKUP at once, and of those
+    a commanded reset is what actually happened, so SREQ is tested before
+    LOCKUP. Reporting a freshly programmed device as watchdog-reset tells an
+    operator something went wrong when nothing did.
+    """
+    # A crash wins: the fault handler latches and then hangs until WDT0 fires,
+    # so both can be set. WDT0 is a real watchdog, so this is the one case that
+    # honestly maps to a watchdog value.
+    if fault or (reset_reason & _RR_WDT0):
+        return BootReason.HardwareWatchdogReset
+    # Only the stop command starts WDT1, so that is a commanded reset.
+    if reset_reason & _RR_WDT1:
+        return BootReason.SoftwareReset
+    if reset_reason & _RR_SREQ:
+        return BootReason.SoftwareReset
+    if reset_reason == 0 or (reset_reason & _RR_PIN):
+        return BootReason.PowerOnReboot
+    return BootReason.Unspecified
 
 
 # Bits of the lh2_flags field.
@@ -589,7 +630,6 @@ class PayloadDeviceInfo(Payload):
             PayloadFieldMetadata(name="info_gen", disp="gen"),
             PayloadFieldMetadata(name="boot_count", disp="boots", length=4),
             PayloadFieldMetadata(name="uptime_s", disp="up", length=4),
-            PayloadFieldMetadata(name="boot_reason", disp="why"),
             PayloadFieldMetadata(
                 name="bl_version",
                 disp="bl",
@@ -632,7 +672,6 @@ class PayloadDeviceInfo(Payload):
     info_gen: int = 0
     boot_count: int = 0
     uptime_s: int = 0
-    boot_reason: int = 0
     bl_version: bytes = dataclasses.field(
         default_factory=lambda: bytes(INFO_STRING_LEN)
     )

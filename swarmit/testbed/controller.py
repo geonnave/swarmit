@@ -30,12 +30,16 @@ from swarmit.testbed.adapter import (
 from swarmit.testbed.logger import LOGGER
 from swarmit.testbed.ota import BLOCK_SIZE_DEFAULT, BlockTransfer
 from swarmit.testbed.protocol import (
+    _RR_LOCKUP,
+    _RR_PIN,
+    _RR_SREQ,
+    _RR_WDT0,
+    _RR_WDT1,
     BROADCAST_ADDRESS,
     LH2_FLAG_FROM_FLASH,
     LH2_FLAG_VALID,
     OTA_PROTOCOL_VERSION_BLOCK,
     OTA_PROTOCOL_VERSION_LEGACY,
-    BootReason,
     DeviceType,
     FaultType,
     ImageResult,
@@ -50,6 +54,7 @@ from swarmit.testbed.protocol import (
     PayloadStop,
     PayloadType,
     StatusType,
+    boot_reason,
     decode_cfsr,
     decode_reset_reason,
     decode_sfsr,
@@ -123,7 +128,6 @@ class DeviceInfo:
     info_gen: int = 0
     boot_count: int = 0
     uptime_s: int = 0
-    boot_reason: int = 0
     bl_version: str = ""
     net_version: str = ""
     image_state: int = 0
@@ -144,7 +148,6 @@ class DeviceInfo:
             info_gen=payload.info_gen,
             boot_count=payload.boot_count,
             uptime_s=payload.uptime_s,
-            boot_reason=payload.boot_reason,
             bl_version=decode_string_field(payload.bl_version),
             net_version=decode_string_field(payload.net_version),
             image_state=payload.image_state,
@@ -181,13 +184,6 @@ class DeviceInfo:
         if not self.has_image:
             return "none"
         return self.image_name or self.image_digest[:16] or "-"
-
-    @property
-    def boot_reason_name(self) -> str:
-        try:
-            return BootReason(self.boot_reason).name
-        except ValueError:
-            return f"reason{self.boot_reason}"
 
     @property
     def image_state_name(self) -> str:
@@ -306,16 +302,6 @@ def battery_level_color(level: int):
     if level > VOLTAGE_WARNING:
         return "green"
     return "red"
-
-
-# RESETREAS bit masks with a swarmit-specific meaning (see the bootloader's
-# two watchdogs: WDT0 is the crash deadman the running app must pet, WDT1 is
-# started by the stop command's DPPI path and nothing else).
-_RR_WDT0 = 1 << 1  # crash / hang: app stopped petting the deadman
-_RR_WDT1 = 1 << 25  # stop command (only thing that starts WDT1)
-_RR_LOCKUP = 1 << 4
-_RR_SREQ = 1 << 3  # soft reset: start_application or calibration-commit reboot
-_RR_PIN = 1 << 0
 
 
 def _fault_name(device_data) -> str:
@@ -575,7 +561,8 @@ def generate_info(status_data, devices=[], show_raw=False):
             table.add_row(
                 "Uptime",
                 f"{format_uptime(info.uptime_s)}   "
-                f"(boot #{info.boot_count}, {info.boot_reason_name})",
+                f"(boot #{info.boot_count}, "
+                f"{boot_reason(d.reset_reason, d.fault).name})",
             )
 
         table.add_row("", "")
