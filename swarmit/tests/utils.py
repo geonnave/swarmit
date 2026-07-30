@@ -193,9 +193,7 @@ class SwarmitNode(threading.Thread):
             self.received_mask = 0
             self._drops_left = self.loss_strategy.drop_count
             self._pending_name = _decode_label(packet.payload.image_name)
-            self._pending_version = _decode_label(
-                packet.payload.image_version
-            )
+            self._pending_version = _decode_label(packet.payload.image_version)
             # A pre-block bootloader sends the ack with no version byte, which
             # the controller reads as version 1 and refuses to flash.
             ack = (

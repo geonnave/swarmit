@@ -873,8 +873,7 @@ def test_device_info_gives_up_on_silent_firmware():
     node.info_gen = 9
     deadline = time.time() + 3
     while (
-        time.time() < deadline
-        and controller.status_data[addr].info_gen != 9
+        time.time() < deadline and controller.status_data[addr].info_gen != 9
     ):
         time.sleep(0.01)
     assert controller.stale_device_info() == [addr]

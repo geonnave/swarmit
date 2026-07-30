@@ -188,9 +188,7 @@ class DeviceInfo:
         if not self.lh2_homography_count:
             return "uncalibrated"
         noun = (
-            "homography"
-            if self.lh2_homography_count == 1
-            else "homographies"
+            "homography" if self.lh2_homography_count == 1 else "homographies"
         )
         flags = []
         if self.lh2_flags & LH2_FLAG_VALID:
@@ -802,10 +800,7 @@ class Controller:
             cached = self._device_info.get(addr)
             if cached is not None and cached.info_gen == status.info_gen:
                 continue
-            if (
-                self._info_attempts.get(addr, 0)
-                >= DEVICE_INFO_MAX_ATTEMPTS
-            ):
+            if self._info_attempts.get(addr, 0) >= DEVICE_INFO_MAX_ATTEMPTS:
                 continue
             stale.append(addr)
         return stale
