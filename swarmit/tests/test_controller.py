@@ -16,7 +16,9 @@ from swarmit.testbed.controller import (
     ResetLocation,
     StaleBootloaderError,
     StartOtaData,
+    format_reset_cause,
     format_uptime,
+    generate_info,
     image_mismatches,
 )
 from swarmit.testbed.logger import setup_logging
@@ -1051,9 +1053,152 @@ def test_device_info_reply_survives_a_concurrent_timeout():
 
     header = MagicMock()
     header.source = 0x22
-    packet = Packet.from_payload(PayloadDeviceInfo(info_gen=3))
+    packet = Packet.from_payload(PayloadDeviceInfo(info_version=1, info_gen=3))
     # status_data is deliberately empty: the device timed out between the
     # request going out and this reply arriving.
     controller.on_frame_received(header, packet)
 
     assert controller._device_info["00000022"].info_gen == 3
+
+
+def test_reset_reason_row_drops_a_redundant_decode():
+    """The raw row's decode should say more than the friendly cause, or nothing.
+
+    A single-bit RESETREAS decodes to exactly the friendly label, so printing
+    both put "soft-reset" under "soft-reset". A multi-bit value genuinely says
+    more and keeps its decode.
+    """
+    from swarmit.testbed.protocol import decode_reset_reason
+
+    single = NodeStatus(reset_reason=0x08)
+    assert decode_reset_reason(0x08) == format_reset_cause(single)
+
+    multi = NodeStatus(reset_reason=0x1C)
+    assert decode_reset_reason(0x1C) == "ctrl-ap+soft-reset+lockup"
+    assert format_reset_cause(multi) == "lockup"
+    assert decode_reset_reason(0x1C) != format_reset_cause(multi)
+
+
+def test_info_panel_does_not_repeat_the_boot_reason():
+    """The Matter vocabulary is for a bridge, not for this panel.
+
+    `Last reset` and `reset_reason` already answer why it booted, from the
+    authoritative register, so a third coarse rendering is noise.
+    """
+    from rich.console import Console
+
+    data = {
+        "AA": NodeStatus(
+            reset_reason=0x08,
+            last_updated_at=time.time(),
+            info_gen=4,
+            info=DeviceInfo(info_gen=4, boot_count=4, uptime_s=12),
+        )
+    }
+    console = Console(width=120, no_color=True)
+    with console.capture() as cap:
+        console.print(generate_info(data, []))
+    out = cap.get()
+
+    assert "boot #4" in out
+    assert "SoftwareReset" not in out
+    # The friendly cause still appears exactly once.
+    assert out.count("soft-reset") == 1
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_TIMEOUT", 0.4)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_fetch_accepts_a_lowercase_device_argument():
+    """`-d` is user input; status_data keys are upper-cased by addr_to_hex.
+
+    Intersecting the two without normalising made the loop exit on the first
+    pass without sending anything.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(address=0xAB, adapter=test_adapter, info_gen=2)
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    controller.fetch_device_info([addr.lower()])
+    assert node.device_info_requests >= 1
+
+    node.stop()
+    controller.terminate()
+
+
+def test_unusable_device_info_is_dropped_and_still_counts_as_a_miss():
+    """A reply that cannot resolve staleness must not reset the attempt cap.
+
+    A truncated body zero-fills to `info_version = 0`. Caching it, or clearing
+    the counter for it, would leave a device that always answers unusably being
+    re-broadcast for the life of the session - a cap that never caps.
+    """
+    from unittest.mock import MagicMock
+
+    from dotbot_utils.protocol import Packet
+
+    from swarmit.testbed.protocol import PayloadDeviceInfo
+
+    controller = Controller.__new__(Controller)
+    controller.logger = MagicMock()
+    controller.settings = ControllerSettings()
+    controller.status_data = {"00000033": NodeStatus(info_gen=7)}
+    controller._device_info = {}
+    controller._info_attempts = {"00000033": 2}
+    controller._info_gen_seen = {}
+    controller._info_forced = set()
+    controller._block_transfer = None
+    controller.start_ota_data = StartOtaData()
+    controller._ota_versions = {}
+    controller._log_event_listeners = []
+    controller._log_listeners_lock = threading.Lock()
+
+    header = MagicMock()
+    header.source = 0x33
+    controller.on_frame_received(
+        header, Packet.from_payload(PayloadDeviceInfo(info_version=0))
+    )
+
+    assert "00000033" not in controller._device_info
+    assert controller._info_attempts["00000033"] == 2
+
+
+def test_matching_generation_clears_the_attempt_cap():
+    from unittest.mock import MagicMock
+
+    from dotbot_utils.protocol import Packet
+
+    from swarmit.testbed.protocol import PayloadDeviceInfo
+
+    controller = Controller.__new__(Controller)
+    controller.logger = MagicMock()
+    controller.settings = ControllerSettings()
+    controller.status_data = {"00000044": NodeStatus(info_gen=7)}
+    controller._device_info = {}
+    controller._info_attempts = {"00000044": 2}
+    controller._info_gen_seen = {}
+    controller._info_forced = set()
+    controller._block_transfer = None
+    controller.start_ota_data = StartOtaData()
+    controller._ota_versions = {}
+    controller._log_event_listeners = []
+    controller._log_listeners_lock = threading.Lock()
+
+    header = MagicMock()
+    header.source = 0x44
+    controller.on_frame_received(
+        header,
+        Packet.from_payload(PayloadDeviceInfo(info_version=1, info_gen=7)),
+    )
+
+    assert controller._device_info["00000044"].info_gen == 7
+    assert "00000044" not in controller._info_attempts

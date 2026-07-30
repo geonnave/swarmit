@@ -36,6 +36,7 @@ from swarmit.testbed.protocol import (
     _RR_WDT0,
     _RR_WDT1,
     BROADCAST_ADDRESS,
+    DEVICE_INFO_VERSION,
     LH2_FLAG_FROM_FLASH,
     LH2_FLAG_VALID,
     OTA_PROTOCOL_VERSION_BLOCK,
@@ -54,7 +55,6 @@ from swarmit.testbed.protocol import (
     PayloadStop,
     PayloadType,
     StatusType,
-    boot_reason,
     decode_cfsr,
     decode_reset_reason,
     decode_sfsr,
@@ -558,11 +558,14 @@ def generate_info(status_data, devices=[], show_raw=False):
             table.add_row("Sandbox fw", f"bootloader  {info.bl_version}")
             table.add_row("", f"netcore     {info.net_version}")
             table.add_row("LH2 calibration", info.lh2_summary)
+            # Boot count only. Why it booted is answered twice below, in more
+            # detail and from the authoritative register - a third rendering,
+            # in the coarse Matter vocabulary, is noise here. That mapping
+            # exists for a gateway-side bridge, not for this panel.
             table.add_row(
                 "Uptime",
                 f"{format_uptime(info.uptime_s)}   "
-                f"(boot #{info.boot_count}, "
-                f"{boot_reason(d.reset_reason, d.fault).name})",
+                f"(boot #{info.boot_count})",
             )
 
         table.add_row("", "")
@@ -572,7 +575,17 @@ def generate_info(status_data, devices=[], show_raw=False):
         )
         table.add_row(
             "  reset_reason",
-            f"0x{d.reset_reason:08x} ({decode_reset_reason(d.reset_reason)})",
+            # The bit-by-bit decode earns its place only when it says more than
+            # the friendly cause above it - 0x1c spelling out
+            # "ctrl-ap+soft-reset+lockup" is worth a line, "soft-reset" under
+            # "soft-reset" is stutter.
+            f"0x{d.reset_reason:08x}"
+            + (
+                f" ({decoded})"
+                if (decoded := decode_reset_reason(d.reset_reason))
+                != format_reset_cause(d)
+                else ""
+            ),
         )
         table.add_row(
             "  fault",
@@ -916,7 +929,15 @@ class Controller:
         for the background refresh. Returns whatever arrived; a device that
         never answers is simply absent.
         """
-        wanted = set(devices) if devices else set(self.status_data)
+        # Upper-cased because that is what addr_to_hex produces for the
+        # status_data keys these are intersected against. A lower-case -d
+        # argument would otherwise intersect to nothing and the loop would
+        # exit on the first pass without ever sending a request.
+        wanted = (
+            {addr.upper() for addr in devices}
+            if devices
+            else set(self.status_data)
+        )
         # An explicit ask re-probes even a bot the background refresh has
         # written off, so a operator running `info` after re-flashing gets an
         # answer rather than the previous verdict.
@@ -1015,8 +1036,22 @@ class Controller:
             info = DeviceInfo.from_payload(
                 packet.payload, raw=packet.to_bytes().hex()
             )
+            if (
+                info.info_version == 0
+                or info.info_version > DEVICE_INFO_VERSION
+            ):
+                # A truncated body zero-fills to version 0; a schema newer than
+                # this host parses as something higher. Neither is usable, and
+                # neither must clear the attempt counter, or a device that
+                # always answers unusably is re-broadcast for the life of the
+                # session. This is what `info_version` is on the wire for.
+                self.logger.debug(
+                    "unusable device info",
+                    device_addr=device_addr,
+                    info_version=info.info_version,
+                )
+                return
             self._device_info[device_addr] = info
-            self._info_attempts.pop(device_addr, None)
             self._info_forced.discard(device_addr)
             # `.get()` rather than `in` then `[]`: this runs on the marilib RX
             # thread while the cleanup thread deletes inactive entries, and the
@@ -1025,6 +1060,12 @@ class Controller:
             cached_status = self.status_data.get(device_addr)
             if cached_status is not None:
                 cached_status.info = info
+                # Clear the cap only when the reply actually resolves the
+                # staleness. Clearing on any reply means a device whose
+                # generation never lines up resets the counter every time and
+                # is asked again forever, which is the opposite of a cap.
+                if info.info_gen == cached_status.info_gen:
+                    self._info_attempts.pop(device_addr, None)
         elif packet.payload_type == PayloadType.SWARMIT_OTA_START_ACK:
             # A bootloader speaking the block protocol appends its version; a
             # legacy one sends the empty ack, which parses as version 1.
