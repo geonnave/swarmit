@@ -573,6 +573,7 @@ def generate_info(status_data, devices=[], show_raw=False):
             "Last reset",
             f"[{reset_cause_color(d)}]{format_reset_cause(d)}",
         )
+        decoded = decode_reset_reason(d.reset_reason)
         table.add_row(
             "  reset_reason",
             # The bit-by-bit decode earns its place only when it says more than
@@ -580,12 +581,7 @@ def generate_info(status_data, devices=[], show_raw=False):
             # "ctrl-ap+soft-reset+lockup" is worth a line, "soft-reset" under
             # "soft-reset" is stutter.
             f"0x{d.reset_reason:08x}"
-            + (
-                f" ({decoded})"
-                if (decoded := decode_reset_reason(d.reset_reason))
-                != format_reset_cause(d)
-                else ""
-            ),
+            + (f" ({decoded})" if decoded != format_reset_cause(d) else ""),
         )
         table.add_row(
             "  fault",
