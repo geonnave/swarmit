@@ -111,11 +111,10 @@ static void _record_persist(void) {
 /// report, which stays the authoritative post-mortem.
 static uint8_t _boot_reason(uint32_t resetreas, uint8_t fault) {
     // A crash wins over everything: the fault handler latches and then hangs
-    // until WDT0 resets the chip, so both bits can be set at once.
+    // until WDT0 resets the chip, so both bits can be set at once. WDT0 is a
+    // real watchdog peripheral, so this is the one case that honestly maps to
+    // the watchdog values.
     if (fault || (resetreas & RR_WDT0)) {
-        return SWRMT_BOOT_REASON_HW_WATCHDOG;
-    }
-    if (resetreas & RR_LOCKUP) {
         return SWRMT_BOOT_REASON_HW_WATCHDOG;
     }
     if (resetreas & RR_WDT1) {
@@ -123,12 +122,19 @@ static uint8_t _boot_reason(uint32_t resetreas, uint8_t fault) {
         // so this is a commanded reset rather than a watchdog failure.
         return SWRMT_BOOT_REASON_SW_RESET;
     }
-    if (resetreas == 0 || (resetreas & RR_PIN)) {
-        return SWRMT_BOOT_REASON_POWER_ON;
-    }
+    // Checked before LOCKUP because a cabled flash sets ctrl-ap, SREQ and
+    // LOCKUP together, and of those a commanded reset is what actually
+    // happened. Reporting a freshly programmed device as watchdog-reset tells
+    // an operator something went wrong when nothing did.
     if (resetreas & RR_SREQ) {
         return SWRMT_BOOT_REASON_SW_RESET;
     }
+    if (resetreas == 0 || (resetreas & RR_PIN)) {
+        return SWRMT_BOOT_REASON_POWER_ON;
+    }
+    // Matter has no value for a CPU lockup, and no watchdog fired, so claiming
+    // one would be worse than admitting the enum cannot express this. The raw
+    // RESETREAS in the status frame stays the authoritative answer.
     return SWRMT_BOOT_REASON_UNSPECIFIED;
 }
 

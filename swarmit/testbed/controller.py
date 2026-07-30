@@ -153,13 +153,28 @@ class DeviceInfo:
         )
 
     @property
+    def has_image(self) -> bool:
+        """Whether the device carries a user image at all.
+
+        A device that has never been flashed over the air reports a zeroed
+        record, so an all-zero digest means "no image" rather than "an image
+        whose digest happens to be zero".
+        """
+        return self.image_size > 0 or self.image_digest.strip("0") != ""
+
+    @property
     def image_label(self) -> str:
         """How to name this image in a table.
 
-        The digest is the identity; the name is decoration that a bot flashed
-        by an older controller simply does not have. Falling back to the
-        digest keeps the column meaningful either way.
+        The digest is the identity; the name is decoration that a device
+        flashed by an older controller simply does not have. Falling back to
+        the digest keeps the column meaningful either way. Note the three
+        outcomes are distinct and all worth telling apart: a name, a bare
+        digest, and `none` for a device that answered and has no image - which
+        is not the same as the `-` shown for one that never answered.
         """
+        if not self.has_image:
+            return "none"
         return self.image_name or self.image_digest[:16] or "-"
 
     @property
@@ -517,7 +532,7 @@ def generate_info(status_data, devices=[]):
             table.add_row("Image", info.image_label)
             if info.image_version:
                 table.add_row("  version", info.image_version)
-            if info.image_digest:
+            if info.has_image and info.image_digest:
                 table.add_row("  digest", info.image_digest)
             if info.image_size:
                 chunks = -(-info.image_size // CHUNK_SIZE)
