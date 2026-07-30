@@ -131,10 +131,12 @@ class DeviceInfo:
     image_version: str = ""
     lh2_homography_count: int = 0
     lh2_flags: int = 0
+    raw: str = ""  # hex of the full device-info packet as received
 
     @classmethod
-    def from_payload(cls, payload) -> "DeviceInfo":
+    def from_payload(cls, payload, raw: str = "") -> "DeviceInfo":
         return cls(
+            raw=raw,
             info_version=payload.info_version,
             info_gen=payload.info_gen,
             boot_count=payload.boot_count,
@@ -356,6 +358,11 @@ def reset_cause_color(device_data) -> str:
     ):
         return "red"
     return "cyan"
+
+
+def _hex_spaced(raw: str) -> str:
+    """Byte-per-pair hex, the way it reads next to a wire-format table."""
+    return " ".join(raw[i : i + 2] for i in range(0, len(raw), 2))
 
 
 def format_uptime(seconds: int) -> str:
@@ -584,12 +591,18 @@ def generate_info(status_data, devices=[]):
             table.add_row("  pc", f"0x{d.pc:08x}  (resolve against {elf})")
             table.add_row("  lr", f"0x{d.lr:08x}")
 
+        # Both raw packets, so the two channels can be compared side by side:
+        # the status frame arrives every second and its last byte is the
+        # generation counter, while the device-info reply arrives only when
+        # that counter moves and ends with the LH2 fields. Same tail position,
+        # unrelated meanings, which is easy to misread without both in view.
         if d.raw:
-            spaced = " ".join(
-                d.raw[i : i + 2] for i in range(0, len(d.raw), 2)
-            )
             table.add_row("", "")
-            table.add_row("Raw status pkt", spaced)
+            table.add_row("Raw status pkt", _hex_spaced(d.raw))
+        if d.info is not None and d.info.raw:
+            if not d.raw:
+                table.add_row("", "")
+            table.add_row("Raw device info", _hex_spaced(d.info.raw))
         panels.append(
             Panel(
                 table,
@@ -949,7 +962,9 @@ class Controller:
                 self._info_attempts.pop(device_addr, None)
             self.status_data.update({device_addr: status})
         elif packet.payload_type == PayloadType.SWARMIT_DEVICE_INFO_RESP:
-            info = DeviceInfo.from_payload(packet.payload)
+            info = DeviceInfo.from_payload(
+                packet.payload, raw=packet.to_bytes().hex()
+            )
             self._device_info[device_addr] = info
             self._info_attempts.pop(device_addr, None)
             if device_addr in self.status_data:
