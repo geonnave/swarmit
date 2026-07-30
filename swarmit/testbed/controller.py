@@ -72,8 +72,11 @@ DEVICE_INFO_REFRESH_INTERVAL = 2.0  # s
 # How many broadcasts a bot may ignore before it is written off as firmware
 # that does not implement the message.
 DEVICE_INFO_MAX_ATTEMPTS = 3
-# How long `info` waits for replies when it asks explicitly.
-DEVICE_INFO_TIMEOUT = 1.5  # s
+# How long `info` waits for replies when it asks explicitly, and how often it
+# re-asks inside that window. Wide enough to survive a bot whose uplink cell is
+# busy carrying a running user image, which one request inside 1.5 s was not.
+DEVICE_INFO_TIMEOUT = 4.0  # s
+DEVICE_INFO_RESEND_INTERVAL = 0.6  # s
 SERIAL_PORT_DEFAULT = get_default_port()
 VOLTAGE_MAX = 3000  # mV
 VOLTAGE_FULL = 2900  # mV
@@ -360,9 +363,21 @@ def reset_cause_color(device_data) -> str:
     return "cyan"
 
 
-def _hex_spaced(raw: str) -> str:
-    """Byte-per-pair hex, the way it reads next to a wire-format table."""
-    return " ".join(raw[i : i + 2] for i in range(0, len(raw), 2))
+def _hex_dump(raw: str, width: int = 16) -> str:
+    """Offset-prefixed hex, the shape nrfjprog and text2pcap both print.
+
+    Wrapped rather than run on one line: a 156-byte device-info packet is 468
+    characters, which stretches the panel to three times the width of every
+    other row in it. The offsets are not decoration - they line up with the
+    field offsets in doc/wire-protocol.md, so a byte can be read straight off
+    the dump against the table there.
+    """
+    out = []
+    for off in range(0, len(raw) // 2, width):
+        chunk = raw[off * 2 : (off + width) * 2]
+        pairs = " ".join(chunk[i : i + 2] for i in range(0, len(chunk), 2))
+        out.append(f"{off:04x}  {pairs}")
+    return "\n".join(out)
 
 
 def format_uptime(seconds: int) -> str:
@@ -500,12 +515,13 @@ def generate_status(status_data, devices=[], status_message="found"):
     return Group(header, table, *lines)
 
 
-def generate_info(status_data, devices=[]):
-    """Full per-device detail: every status field plus the raw crash report.
+def generate_info(status_data, devices=[], show_raw=False):
+    """Full per-device detail: every status field plus what the bot is running.
 
-    The status table shows a friendly one-line reset cause; this dumps
-    everything the bot reports - decoded and raw - for post-mortem of a
-    specific robot.
+    The status table shows a friendly one-line reset cause; this decodes
+    everything the bot reports, for post-mortem of a specific robot.
+    `show_raw` appends the wire bytes of both packets, which are useful for
+    protocol work and noise for everything else.
     """
     data = {
         addr: device_data
@@ -514,6 +530,7 @@ def generate_info(status_data, devices=[]):
     }
     if not data:
         return Group(Text("\nNo matching device\n"))
+    has_raw = False
 
     panels = [Text("")]
     for device_addr, d in sorted(data.items()):
@@ -591,18 +608,22 @@ def generate_info(status_data, devices=[]):
             table.add_row("  pc", f"0x{d.pc:08x}  (resolve against {elf})")
             table.add_row("  lr", f"0x{d.lr:08x}")
 
-        # Both raw packets, so the two channels can be compared side by side:
-        # the status frame arrives every second and its last byte is the
-        # generation counter, while the device-info reply arrives only when
-        # that counter moves and ends with the LH2 fields. Same tail position,
-        # unrelated meanings, which is easy to misread without both in view.
-        if d.raw:
-            table.add_row("", "")
-            table.add_row("Raw status pkt", _hex_spaced(d.raw))
-        if d.info is not None and d.info.raw:
-            if not d.raw:
+        # Both raw packets together, because the pair is what makes the two
+        # channels legible: the status frame arrives every second and its last
+        # byte is the generation counter, while the device-info reply arrives
+        # only when that counter moves and ends with the LH2 fields. Same tail
+        # position, unrelated meanings, easy to misread with only one in view.
+        # Off by default - 156 bytes of hex is most of the panel, and nobody
+        # reading battery and uptime wants it.
+        if show_raw:
+            if d.raw:
                 table.add_row("", "")
-            table.add_row("Raw device info", _hex_spaced(d.info.raw))
+                table.add_row("Raw status pkt", _hex_dump(d.raw))
+            if d.info is not None and d.info.raw:
+                table.add_row("", "")
+                table.add_row("Raw device info", _hex_dump(d.info.raw))
+        elif d.raw or (d.info is not None and d.info.raw):
+            has_raw = True
         panels.append(
             Panel(
                 table,
@@ -612,6 +633,13 @@ def generate_info(status_data, devices=[]):
                 padding=(0, 1),
                 expand=False,
             )
+        )
+        panels.append(Text(""))
+    if has_raw:
+        # One line for the whole run, not per panel: the bytes are two
+        # keystrokes away instead of hidden, and cost nothing when unwanted.
+        panels.append(
+            Text("  wire bytes available: re-run with --raw", style="dim")
         )
         panels.append(Text(""))
     return Group(*panels)
@@ -888,14 +916,23 @@ class Controller:
         # answer rather than the previous verdict.
         for addr in wanted:
             self._info_attempts.pop(addr, None)
-        self.request_device_info(devices)
         deadline = time.time() + timeout
+        next_send = 0.0
         while time.time() < deadline:
             # Waiting on "cached at all" would return immediately with the
             # entry from before the change; wait for the generation counters
             # to line up instead.
             if not wanted & set(self.stale_device_info()):
                 break
+            # Re-ask rather than send once and hope. A bot running a chatty
+            # user image is contending for the single uplink cell it owns per
+            # slotframe, and a 156-byte reply loses that race often enough that
+            # one request inside the window frequently returns nothing. Sending
+            # stops the moment every wanted device has answered.
+            now = time.time()
+            if now >= next_send:
+                self.request_device_info(devices)
+                next_send = now + DEVICE_INFO_RESEND_INTERVAL
             time.sleep(0.01)
         return {
             addr: info

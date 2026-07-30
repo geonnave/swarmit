@@ -657,8 +657,17 @@ def status(ctx, watch):
 
 
 @main.command()
+@click.option(
+    "--raw",
+    is_flag=True,
+    help=(
+        "Also dump the wire bytes of the status frame and the device-info "
+        "reply, offset-prefixed. Offsets match the field tables in "
+        "doc/wire-protocol.md."
+    ),
+)
 @click.pass_context
-def info(ctx):
+def info(ctx, raw):
     """Show full detail for the selected device(s).
 
     Everything from the status packet plus the raw crash report (decoded
@@ -672,7 +681,7 @@ def info(ctx):
         # Ask rather than wait for the background sweep: `info` is the
         # command an operator runs precisely when they want it now.
         client.refresh_device_info(settings.devices or None)
-        print(generate_info(client.status(), settings.devices))
+        print(generate_info(client.status(), settings.devices, show_raw=raw))
 
 
 @main.command()
