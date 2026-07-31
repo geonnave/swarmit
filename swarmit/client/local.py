@@ -54,6 +54,8 @@ class LocalSwarmitClient:
         devices: list[str] | None = None,
         ota_timeout: float | None = None,
         ota_max_retries: int | None = None,
+        image_name: str = "",
+        image_version: str = "",
     ) -> Iterator[dict]:
         """Run an OTA and yield progress events.
 
@@ -70,7 +72,9 @@ class LocalSwarmitClient:
         if ota_max_retries is not None:
             self._controller.settings.ota_max_retries = ota_max_retries
         try:
-            yield from self._run_flash(firmware, devices)
+            yield from self._run_flash(
+                firmware, devices, image_name, image_version
+            )
         finally:
             self._controller.settings.ota_timeout = saved_timeout
             self._controller.settings.ota_max_retries = saved_retries
@@ -79,13 +83,16 @@ class LocalSwarmitClient:
         self,
         firmware: bytes,
         devices: list[str] | None = None,
+        image_name: str = "",
+        image_version: str = "",
     ) -> Iterator[dict]:
         fw = bytearray(firmware)
         try:
-            start_data = (
-                self._controller.start_ota(fw, devices)
-                if devices
-                else self._controller.start_ota(fw)
+            start_data = self._controller.start_ota(
+                fw,
+                devices if devices else None,
+                image_name=image_name,
+                image_version=image_version,
             )
         except Exception as exc:
             yield {"type": "error", "message": f"start_ota: {exc}"}
@@ -184,6 +191,10 @@ class LocalSwarmitClient:
 
     def request_lh2_capture(self, device_addr: str) -> None:
         self._controller.request_lh2_capture(device_addr)
+
+    def refresh_device_info(self, devices: list[str] | None = None) -> None:
+        """Ask the selected devices for their device-info block and wait."""
+        self._controller.fetch_device_info(devices)
 
     def watch_status(
         self, interval: float = 0.5

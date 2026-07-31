@@ -214,6 +214,15 @@ class FlashRequest(BaseModel):
     # Per-flash overrides. None = use the daemon's controller defaults.
     ota_timeout: Optional[float] = None
     ota_max_retries: Optional[int] = None
+    # Display-only labels stored with the image and reported back by the bot.
+    image_name: str = ""
+    image_version: str = ""
+
+
+class DeviceInfoRequest(BaseModel):
+    """Refresh the device-info cache. None = every known device."""
+
+    devices: Optional[List[str]] = None
 
 
 class MessageRequest(BaseModel):
@@ -279,10 +288,12 @@ async def flash_firmware(payload: FlashRequest, request: Request):
 
     async with controller_lock:
 
-        start_data = (
-            await run_in_threadpool(controller.start_ota, fw, devices)
-            if devices
-            else await run_in_threadpool(controller.start_ota, fw)
+        start_data = await run_in_threadpool(
+            controller.start_ota,
+            fw,
+            devices if devices else None,
+            payload.image_name,
+            payload.image_version,
         )
 
         if start_data["missed"]:
@@ -350,10 +361,12 @@ async def flash_stream(payload: FlashRequest, request: Request):
 
     async def _do_flash(controller, fw, devices):
         try:
-            start_data = (
-                await run_in_threadpool(controller.start_ota, fw, devices)
-                if devices
-                else await run_in_threadpool(controller.start_ota, fw)
+            start_data = await run_in_threadpool(
+                controller.start_ota,
+                fw,
+                devices if devices else None,
+                payload.image_name,
+                payload.image_version,
             )
         except Exception as exc:
             yield _sse({"type": "error", "message": f"start_ota: {exc}"})
@@ -463,16 +476,29 @@ async def flash_stream(payload: FlashRequest, request: Request):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+def _serialise_node(node, include_device_info_raw: bool = True) -> dict:
+    """One NodeStatus as JSON, optionally without the device-info wire bytes.
+
+    That field is 310 characters of hex per device - about 31 kB per snapshot
+    across 100 devices - and only `info --raw` ever reads it. Carrying it on a
+    stream that emits twice a second is most of the stream, so `/events` drops
+    it and `/status`, which is fetched once per command, keeps it.
+    """
+    data = {
+        **asdict(node),
+        "device": node.device.name,
+        "status": node.status.name,
+    }
+    if not include_device_info_raw and isinstance(data.get("info"), dict):
+        data["info"] = {**data["info"], "raw": ""}
+    return data
+
+
 @api.get("/status")
 async def status(request: Request):
     controller: Controller = request.app.state.controller
     response = {
-        k: {
-            **asdict(v),
-            "device": v.device.name,
-            "status": v.status.name,
-        }
-        for k, v in controller.status_data.items()
+        k: _serialise_node(v) for k, v in controller.status_data.items()
     }
     return JSONResponse(content={"response": response})
 
@@ -582,6 +608,25 @@ async def lh2_capture(request: Request, payload: CaptureRequest):
     return JSONResponse(content={"response": "done"})
 
 
+@api.post("/device_info", dependencies=[Depends(verify_jwt)])
+async def device_info(request: Request, payload: DeviceInfoRequest):
+    """Ask devices to re-report what they are running, and wait for replies.
+
+    The background refresh already keeps this current; this route exists so
+    `info` can ask explicitly instead of waiting for the next sweep.
+
+    Deliberately outside `controller_lock`. That lock is held for the whole of
+    a flash campaign, and this is a read-only diagnostic that is most wanted
+    *while* something is going on - taking it would block `info` behind a
+    running flash for minutes, and in the other direction hold a starting flash
+    off for the fetch timeout. Nothing here touches the OTA state the lock
+    protects; it only reads status and writes the device-info cache.
+    """
+    controller: Controller = request.app.state.controller
+    await run_in_threadpool(controller.fetch_device_info, payload.devices)
+    return JSONResponse(content={"response": "done"})
+
+
 @api.get("/events")
 async def events(request: Request):
     """Server-Sent Events multiplex.
@@ -602,11 +647,7 @@ async def events(request: Request):
         # race ("dictionary changed size during iteration").
         snapshot = dict(controller.status_data)
         return {
-            addr: {
-                **asdict(node),
-                "device": node.device.name,
-                "status": node.status.name,
-            }
+            addr: _serialise_node(node, include_device_info_raw=False)
             for addr, node in snapshot.items()
         }
 

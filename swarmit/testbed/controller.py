@@ -30,15 +30,26 @@ from swarmit.testbed.adapter import (
 from swarmit.testbed.logger import LOGGER
 from swarmit.testbed.ota import BLOCK_SIZE_DEFAULT, BlockTransfer
 from swarmit.testbed.protocol import (
+    _RR_LOCKUP,
+    _RR_PIN,
+    _RR_SREQ,
+    _RR_WDT0,
+    _RR_WDT1,
     BROADCAST_ADDRESS,
+    DEVICE_INFO_VERSION,
+    LH2_FLAG_FROM_FLASH,
+    LH2_FLAG_VALID,
     OTA_PROTOCOL_VERSION_BLOCK,
     OTA_PROTOCOL_VERSION_LEGACY,
     DeviceType,
     FaultType,
+    ImageResult,
+    ImageState,
     PayloadCalibrationData,
     PayloadLH2Capture,
     PayloadMessage,
     PayloadOTAStart,
+    PayloadRequestMessage,
     PayloadReset,
     PayloadStart,
     PayloadStop,
@@ -47,6 +58,7 @@ from swarmit.testbed.protocol import (
     decode_cfsr,
     decode_reset_reason,
     decode_sfsr,
+    decode_string_field,
 )
 
 CHUNK_SIZE = 128
@@ -58,6 +70,24 @@ STATUS_TIMEOUT = 2
 MONITOR_TIMEOUT = 60  # s
 OTA_MAX_RETRIES_DEFAULT = 10
 OTA_ACK_TIMEOUT_DEFAULT = 0.7
+# Shortest gap between two device-info broadcasts. One broadcast serves every
+# stale bot at once - each answers in its own uplink cell - so this is a
+# refresh rate for the whole fleet, not per device.
+DEVICE_INFO_REFRESH_INTERVAL = 2.0  # s
+# Ceiling on the retry interval for a device that should answer and has not.
+# There is deliberately no attempt cap: firmware that cannot answer is
+# identified by a zero generation counter and never asked at all, so the only
+# devices reaching this path are ones that should reply - typically busy
+# carrying a running user image. Giving up on those would leave them showing
+# as unknown until something else moved their counter, so they are asked less
+# often instead of not at all. At the ceiling this is 0.03 requests a second
+# for the whole fleet.
+DEVICE_INFO_BACKOFF_MAX = 30.0  # s
+# How long `info` waits for replies when it asks explicitly, and how often it
+# re-asks inside that window. Wide enough to survive a bot whose uplink cell is
+# busy carrying a running user image, which one request inside 1.5 s was not.
+DEVICE_INFO_TIMEOUT = 4.0  # s
+DEVICE_INFO_RESEND_INTERVAL = 0.6  # s
 SERIAL_PORT_DEFAULT = get_default_port()
 VOLTAGE_MAX = 3000  # mV
 VOLTAGE_FULL = 2900  # mV
@@ -93,6 +123,105 @@ class StaleBootloaderError(Exception):
 
 
 @dataclass
+class DeviceInfo:
+    """What a bot reports it is running, decoded for display.
+
+    Fetched once and cached; refreshed only when the status frame's
+    generation counter stops matching `info_gen`.
+    """
+
+    info_version: int = 0
+    info_gen: int = 0
+    boot_count: int = 0
+    uptime_s: int = 0
+    bl_version: str = ""
+    net_version: str = ""
+    image_state: int = 0
+    image_result: int = 0
+    image_size: int = 0
+    image_digest: str = ""  # hex, first 8 bytes of the image SHA256
+    image_name: str = ""
+    image_version: str = ""
+    lh2_homography_count: int = 0
+    lh2_flags: int = 0
+    raw: str = ""  # hex of the full device-info packet as received
+
+    @classmethod
+    def from_payload(cls, payload, raw: str = "") -> "DeviceInfo":
+        return cls(
+            raw=raw,
+            info_version=payload.info_version,
+            info_gen=payload.info_gen,
+            boot_count=payload.boot_count,
+            uptime_s=payload.uptime_s,
+            bl_version=decode_string_field(payload.bl_version),
+            net_version=decode_string_field(payload.net_version),
+            image_state=payload.image_state,
+            image_result=payload.image_result,
+            image_size=payload.image_size,
+            image_digest=bytes(payload.image_digest).hex(),
+            image_name=decode_string_field(payload.image_name),
+            image_version=decode_string_field(payload.image_version),
+            lh2_homography_count=payload.lh2_homography_count,
+            lh2_flags=payload.lh2_flags,
+        )
+
+    @property
+    def has_image(self) -> bool:
+        """Whether the device carries a user image at all.
+
+        A device that has never been flashed over the air reports a zeroed
+        record, so an all-zero digest means "no image" rather than "an image
+        whose digest happens to be zero".
+        """
+        return self.image_size > 0 or self.image_digest.strip("0") != ""
+
+    @property
+    def image_label(self) -> str:
+        """How to name this image in a table.
+
+        The digest is the identity; the name is decoration that a device
+        flashed by an older controller simply does not have. Falling back to
+        the digest keeps the column meaningful either way. Note the three
+        outcomes are distinct and all worth telling apart: a name, a bare
+        digest, and `none` for a device that answered and has no image - which
+        is not the same as the `-` shown for one that never answered.
+        """
+        if not self.has_image:
+            return "none"
+        return self.image_name or self.image_digest[:16] or "-"
+
+    @property
+    def image_state_name(self) -> str:
+        try:
+            return ImageState(self.image_state).name
+        except ValueError:
+            return f"state{self.image_state}"
+
+    @property
+    def image_result_name(self) -> str:
+        try:
+            return ImageResult(self.image_result).name
+        except ValueError:
+            return f"result{self.image_result}"
+
+    @property
+    def lh2_summary(self) -> str:
+        if not self.lh2_homography_count:
+            return "uncalibrated"
+        noun = (
+            "homography" if self.lh2_homography_count == 1 else "homographies"
+        )
+        flags = []
+        if self.lh2_flags & LH2_FLAG_VALID:
+            flags.append("valid")
+        if self.lh2_flags & LH2_FLAG_FROM_FLASH:
+            flags.append("from flash")
+        suffix = f" ({', '.join(flags)})" if flags else ""
+        return f"{self.lh2_homography_count} {noun}{suffix}"
+
+
+@dataclass
 class NodeStatus:
     """Class that holds node status."""
 
@@ -110,6 +239,10 @@ class NodeStatus:
     lr: int = 0
     raw: str = ""  # hex of the full status packet as received
     last_updated_at: float = 0
+    # Generation counter as of the most recent status frame. When it differs
+    # from `info.info_gen` the cached block is stale and gets refetched.
+    info_gen: int = 0
+    info: DeviceInfo | None = None
 
 
 @dataclass
@@ -177,16 +310,6 @@ def battery_level_color(level: int):
     return "red"
 
 
-# RESETREAS bit masks with a swarmit-specific meaning (see the bootloader's
-# two watchdogs: WDT0 is the crash deadman the running app must pet, WDT1 is
-# started by the stop command's DPPI path and nothing else).
-_RR_WDT0 = 1 << 1  # crash / hang: app stopped petting the deadman
-_RR_WDT1 = 1 << 25  # stop command (only thing that starts WDT1)
-_RR_LOCKUP = 1 << 4
-_RR_SREQ = 1 << 3  # soft reset: start_application or calibration-commit reboot
-_RR_PIN = 1 << 0
-
-
 def _fault_name(device_data) -> str:
     try:
         return FaultType(device_data.fault).name
@@ -232,6 +355,66 @@ def reset_cause_color(device_data) -> str:
     return "cyan"
 
 
+def _hex_dump(raw: str, width: int = 16) -> str:
+    """Offset-prefixed hex, the shape nrfjprog and text2pcap both print.
+
+    Wrapped rather than run on one line: a 156-byte device-info packet is 468
+    characters, which stretches the panel to three times the width of every
+    other row in it. The offsets are not decoration - they line up with the
+    field offsets in doc/wire-protocol.md, so a byte can be read straight off
+    the dump against the table there.
+    """
+    out = []
+    for off in range(0, len(raw) // 2, width):
+        chunk = raw[off * 2 : (off + width) * 2]
+        pairs = " ".join(chunk[i : i + 2] for i in range(0, len(chunk), 2))
+        out.append(f"{off:04x}  {pairs}")
+    return "\n".join(out)
+
+
+def format_uptime(seconds: int) -> str:
+    """Uptime as the operator reads it, not as a raw second count."""
+    hours, rem = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def image_mismatches(status_data) -> tuple[str, list[tuple[str, DeviceInfo]]]:
+    """The fleet's majority image digest, and every device that differs.
+
+    Comparison is on the digest, never the name: the name is display-only and
+    two bots can carry the same label with different bytes. Devices that have
+    not reported device info yet are not counted either way - unknown is not
+    the same as different.
+    """
+    known = {
+        addr: data.info
+        for addr, data in status_data.items()
+        if data.info is not None and data.info.image_digest
+    }
+    if len(known) < 2:
+        return "", []
+    counts: dict[str, int] = {}
+    for info in known.values():
+        counts[info.image_digest] = counts.get(info.image_digest, 0) + 1
+    majority = max(counts, key=lambda digest: (counts[digest], digest))
+    if counts[majority] == len(known):
+        return majority, []
+    odd = sorted(
+        (
+            (addr, info)
+            for addr, info in known.items()
+            if info.image_digest != majority
+        ),
+        key=lambda item: item[0],
+    )
+    return majority, odd
+
+
 def generate_status(status_data, devices=[], status_message="found"):
     data = {
         addr: device_data
@@ -269,11 +452,25 @@ def generate_status(status_data, devices=[], status_message="found"):
         width=max([len(m) for m in StatusType.__members__]),
     )
     table.add_column(
+        "Image",
+        style="cyan",
+        justify="center",
+    )
+    table.add_column(
         "Last reset",
         style="cyan",
         justify="center",
     )
+    majority, odd_ones = image_mismatches(data)
+    odd_addrs = {addr for addr, _ in odd_ones}
     for device_addr, device_data in sorted(data.items()):
+        info = device_data.info
+        # "-" means the bot has not answered yet, which is what an older
+        # bootloader looks like. It is deliberately not the same as a blank
+        # name on a bot that did answer - that falls back to the digest.
+        image = info.image_label if info else "-"
+        if device_addr in odd_addrs:
+            image = f"[yellow]{image}"
 
         table.add_row(
             f"{device_addr}",
@@ -281,17 +478,42 @@ def generate_status(status_data, devices=[], status_message="found"):
             f"[{battery_level_color(device_data.battery)}]{device_data.battery / 1000:.2f}V ({int(device_data.battery / 3000 * 100)}%)",
             f"({device_data.pos_x}, {device_data.pos_y})",
             f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
+            image,
             f"[{reset_cause_color(device_data)}]{format_reset_cause(device_data)}",
         )
-    return Group(header, table)
+    if not odd_ones:
+        return Group(header, table)
+
+    # The point of putting a digest on the wire: the odd bot out surfaces
+    # without an operator reading a hundred rows.
+    plural = "s" if len(odd_ones) > 1 else ""
+    lines = [
+        Text(""),
+        Text(
+            f"! {len(odd_ones)} of {len(data)} device{plural} "
+            f"differ{'' if len(odd_ones) > 1 else 's'} from the fleet majority:",
+            style="yellow",
+        ),
+    ]
+    for addr, info in odd_ones:
+        label = f" ({info.image_name})" if info.image_name else ""
+        lines.append(
+            Text(
+                f"    {addr}  image {info.image_digest[:16]}{label}, "
+                f"majority is {majority[:16]}",
+                style="yellow",
+            )
+        )
+    return Group(header, table, *lines)
 
 
-def generate_info(status_data, devices=[]):
-    """Full per-device detail: every status field plus the raw crash report.
+def generate_info(status_data, devices=[], show_raw=False):
+    """Full per-device detail: every status field plus what the bot is running.
 
-    The status table shows a friendly one-line reset cause; this dumps
-    everything the bot reports - decoded and raw - for post-mortem of a
-    specific robot.
+    The status table shows a friendly one-line reset cause; this decodes
+    everything the bot reports, for post-mortem of a specific robot.
+    `show_raw` appends the wire bytes of both packets, which are useful for
+    protocol work and noise for everything else.
     """
     data = {
         addr: device_data
@@ -300,6 +522,7 @@ def generate_info(status_data, devices=[]):
     }
     if not data:
         return Group(Text("\nNo matching device\n"))
+    has_raw = False
 
     panels = [Text("")]
     for device_addr, d in sorted(data.items()):
@@ -319,14 +542,52 @@ def generate_info(status_data, devices=[]):
             age = max(0.0, time.time() - d.last_updated_at)
             table.add_row("Last update", f"{age:.1f}s ago")
 
+        if d.info is not None:
+            info = d.info
+            table.add_row("", "")
+            table.add_row("Image", info.image_label)
+            if info.image_version:
+                table.add_row("  version", info.image_version)
+            if info.has_image and info.image_digest:
+                table.add_row("  digest", info.image_digest)
+            if info.image_size:
+                chunks = -(-info.image_size // CHUNK_SIZE)
+                table.add_row(
+                    "  size", f"{info.image_size} B ({chunks} chunks)"
+                )
+            table.add_row(
+                "  state",
+                f"{info.image_state_name} / {info.image_result_name}",
+            )
+
+            table.add_row("", "")
+            table.add_row("Sandbox fw", f"bootloader  {info.bl_version}")
+            table.add_row("", f"netcore     {info.net_version}")
+            table.add_row("LH2 calibration", info.lh2_summary)
+            # Boot count only. Why it booted is answered twice below, in more
+            # detail and from the authoritative register - a third rendering,
+            # in the coarse Matter vocabulary, is noise here. That mapping
+            # exists for a gateway-side bridge, not for this panel.
+            table.add_row(
+                "Uptime",
+                f"{format_uptime(info.uptime_s)}   "
+                f"(boot #{info.boot_count})",
+            )
+
         table.add_row("", "")
         table.add_row(
             "Last reset",
             f"[{reset_cause_color(d)}]{format_reset_cause(d)}",
         )
+        decoded = decode_reset_reason(d.reset_reason)
         table.add_row(
             "  reset_reason",
-            f"0x{d.reset_reason:08x} ({decode_reset_reason(d.reset_reason)})",
+            # The bit-by-bit decode earns its place only when it says more than
+            # the friendly cause above it - 0x1c spelling out
+            # "ctrl-ap+soft-reset+lockup" is worth a line, "soft-reset" under
+            # "soft-reset" is stutter.
+            f"0x{d.reset_reason:08x}"
+            + (f" ({decoded})" if decoded != format_reset_cause(d) else ""),
         )
         table.add_row(
             "  fault",
@@ -349,12 +610,22 @@ def generate_info(status_data, devices=[]):
             table.add_row("  pc", f"0x{d.pc:08x}  (resolve against {elf})")
             table.add_row("  lr", f"0x{d.lr:08x}")
 
-        if d.raw:
-            spaced = " ".join(
-                d.raw[i : i + 2] for i in range(0, len(d.raw), 2)
-            )
-            table.add_row("", "")
-            table.add_row("Raw status pkt", spaced)
+        # Both raw packets together, because the pair is what makes the two
+        # channels legible: the status frame arrives every second and its last
+        # byte is the generation counter, while the device-info reply arrives
+        # only when that counter moves and ends with the LH2 fields. Same tail
+        # position, unrelated meanings, easy to misread with only one in view.
+        # Off by default - 156 bytes of hex is most of the panel, and nobody
+        # reading battery and uptime wants it.
+        if show_raw:
+            if d.raw:
+                table.add_row("", "")
+                table.add_row("Raw status pkt", _hex_dump(d.raw))
+            if d.info is not None and d.info.raw:
+                table.add_row("", "")
+                table.add_row("Raw device info", _hex_dump(d.info.raw))
+        elif d.raw or (d.info is not None and d.info.raw):
+            has_raw = True
         panels.append(
             Panel(
                 table,
@@ -364,6 +635,13 @@ def generate_info(status_data, devices=[]):
                 padding=(0, 1),
                 expand=False,
             )
+        )
+        panels.append(Text(""))
+    if has_raw:
+        # One line for the whole run, not per panel: the bytes are two
+        # keystrokes away instead of hidden, and cost nothing when unwanted.
+        panels.append(
+            Text("  wire bytes available: re-run with --raw", style="dim")
         )
         panels.append(Text(""))
     return Group(*panels)
@@ -450,6 +728,18 @@ class Controller:
         # Active block transfer, so RX-thread report/finalize frames can be fed
         # into it. None outside a block-OTA transfer.
         self._block_transfer: BlockTransfer | None = None
+        # Device-info cache, keyed by address.
+        self._device_info: dict[str, DeviceInfo] = {}
+        # Per-device retry state: how long to wait before asking again, and
+        # when that wait expires. Both reset the moment a device answers
+        # usefully or its generation moves.
+        self._info_backoff: dict[str, float] = {}
+        self._info_next_try: dict[str, float] = {}
+        self._info_gen_seen: dict[str, int] = {}
+        self._info_last_broadcast: float = 0.0
+        # Addresses an explicit fetch is waiting on a fresh reply for,
+        # regardless of the generation counter. Cleared as replies land.
+        self._info_forced: set[str] = set()
         self._known_devices: dict[str, StatusType] = {}
         self._log_event_listeners: list = []
         self._log_listeners_lock = threading.Lock()
@@ -541,17 +831,161 @@ class Controller:
     def _cleanup_loop(self):
         while not self._stop_event.is_set():
             self.cleanup_inactive(INACTIVE_TIMEOUT)
+            self._refresh_stale_device_info()
             time.sleep(1)
 
     def cleanup_inactive(self, timeout):
         now = time.time()
+        # Snapshot with list(): the RX thread inserts into status_data as
+        # frames arrive, and iterating it live raises RuntimeError.
         inactive = [
             addr
-            for addr, status in self.status_data.items()
+            for addr, status in list(self.status_data.items())
             if now - status.last_updated_at > timeout
         ]
         for addr in inactive:
-            del self.status_data[addr]
+            self.status_data.pop(addr, None)
+            self._device_info.pop(addr, None)
+            self._info_backoff.pop(addr, None)
+            self._info_next_try.pop(addr, None)
+            self._info_gen_seen.pop(addr, None)
+            self._info_forced.discard(addr)
+
+    def stale_device_info(self) -> list[str]:
+        """Devices whose cached device info no longer matches their status.
+
+        A bot is stale when it has never answered, or when the generation
+        counter in its status frame has moved past the one its last reply
+        carried. Bots that have ignored the request often enough to look like
+        older firmware are excluded.
+        """
+        now = time.time()
+        stale = []
+        for addr, status in list(self.status_data.items()):
+            # Zero means the device never sent a counter at all, which is what
+            # firmware predating this message looks like once the short status
+            # frame is zero-filled. That is a property of the device rather
+            # than a guess from a timeout, so it is never asked - not even when
+            # forced, since it cannot answer.
+            if status.info_gen == 0:
+                continue
+            # An explicit ask counts as stale whatever the counter says: some
+            # of this block is not inventory. `uptime_s` changes every second,
+            # so "the generation has not moved" does not mean "the values are
+            # still true", and `info` exists to answer as of now.
+            forced = addr in self._info_forced
+            cached = self._device_info.get(addr)
+            if (
+                not forced
+                and cached is not None
+                and cached.info_gen == status.info_gen
+            ):
+                continue
+            if not forced and now < self._info_next_try.get(addr, 0.0):
+                continue
+            stale.append(addr)
+        return stale
+
+    def _refresh_stale_device_info(self):
+        """Ask the fleet for device info, but only when something changed.
+
+        This is the whole point of the generation counter: in steady state
+        nothing is stale and not a single packet goes out. A flash campaign or
+        a reboot moves the counter and costs exactly one broadcast, which every
+        stale bot answers in its own uplink cell.
+        """
+        stale = self.stale_device_info()
+        if not stale:
+            return
+        now = time.time()
+        if now - self._info_last_broadcast < DEVICE_INFO_REFRESH_INTERVAL:
+            return
+        self._info_last_broadcast = now
+        for addr in stale:
+            # Double the wait each time it goes unanswered, up to the ceiling.
+            backoff = min(
+                self._info_backoff.get(addr, 0.0) * 2
+                or DEVICE_INFO_REFRESH_INTERVAL,
+                DEVICE_INFO_BACKOFF_MAX,
+            )
+            self._info_backoff[addr] = backoff
+            self._info_next_try[addr] = now + backoff
+        try:
+            self.request_device_info()
+        except Exception:
+            # The refresh runs on the cleanup thread; a transport hiccup here
+            # must not take that thread down with it.
+            self.logger.debug("device info refresh failed", exc_info=True)
+
+    def request_device_info(self, devices=None):
+        """Ask devices to emit their device-info block once.
+
+        Broadcast by default: bots reply in their own uplink cells, so one
+        request reaches the whole fleet for the cost of a single downlink
+        packet.
+        """
+        payload = PayloadRequestMessage(
+            msg_id=PayloadType.SWARMIT_DEVICE_INFO_RESP
+        )
+        if not devices:
+            self.send_payload(BROADCAST_ADDRESS, payload)
+            return
+        for addr in devices:
+            self.send_payload(int(addr, 16), payload)
+
+    def fetch_device_info(
+        self, devices=None, timeout=DEVICE_INFO_TIMEOUT
+    ) -> dict[str, DeviceInfo]:
+        """Request device info and wait for the replies to land.
+
+        Used by the `info` command, which asks explicitly rather than waiting
+        for the background refresh. Returns whatever arrived; a device that
+        never answers is simply absent.
+        """
+        # Upper-cased because that is what addr_to_hex produces for the
+        # status_data keys these are intersected against. A lower-case -d
+        # argument would otherwise intersect to nothing and the loop would
+        # exit on the first pass without ever sending a request.
+        wanted = (
+            {addr.upper() for addr in devices}
+            if devices
+            else set(self.status_data)
+        )
+        # An explicit ask cancels any backoff, so an operator running `info`
+        # does not wait out a retry interval the sweep happened to be in.
+        for addr in wanted:
+            self._info_backoff.pop(addr, None)
+            self._info_next_try.pop(addr, None)
+        # Demand a genuinely fresh reply rather than accepting the cached
+        # block. The cache stays in place meanwhile, so a device that never
+        # answers still renders what was last known instead of nothing.
+        self._info_forced |= wanted
+        deadline = time.time() + timeout
+        next_send = 0.0
+        while time.time() < deadline:
+            # Waiting on "cached at all" would return immediately with the
+            # entry from before the change; wait for the generation counters
+            # to line up instead.
+            if not wanted & set(self.stale_device_info()):
+                break
+            # Re-ask rather than send once and hope. A bot running a chatty
+            # user image is contending for the single uplink cell it owns per
+            # slotframe, and a 156-byte reply loses that race often enough that
+            # one request inside the window frequently returns nothing. Sending
+            # stops the moment every wanted device has answered.
+            now = time.time()
+            if now >= next_send:
+                self.request_device_info(devices)
+                next_send = now + DEVICE_INFO_RESEND_INTERVAL
+            time.sleep(0.01)
+        # Drop the demand whether or not it was met, so a device that stayed
+        # silent does not keep the background sweep broadcasting for it.
+        self._info_forced -= wanted
+        return {
+            addr: info
+            for addr, info in self._device_info.items()
+            if addr in wanted
+        }
 
     def terminate(self):
         """Terminate the controller."""
@@ -600,8 +1034,53 @@ class Controller:
                 lr=packet.payload.lr,
                 raw=packet.to_bytes().hex(),
                 last_updated_at=now,
+                info_gen=packet.payload.info_gen,
+                # Carried over rather than refetched: the block only changes
+                # when the generation counter says it did.
+                info=self._device_info.get(device_addr),
             )
+            if self._info_gen_seen.get(device_addr) != status.info_gen:
+                self._info_gen_seen[device_addr] = status.info_gen
+                # Something changed on this bot, so it is worth asking again
+                # immediately even if it had been backing off.
+                self._info_backoff.pop(device_addr, None)
+                self._info_next_try.pop(device_addr, None)
             self.status_data.update({device_addr: status})
+        elif packet.payload_type == PayloadType.SWARMIT_DEVICE_INFO_RESP:
+            info = DeviceInfo.from_payload(
+                packet.payload, raw=packet.to_bytes().hex()
+            )
+            if (
+                info.info_version == 0
+                or info.info_version > DEVICE_INFO_VERSION
+            ):
+                # A truncated body zero-fills to version 0; a schema newer than
+                # this host parses as something higher. Neither is usable, and
+                # neither must clear the attempt counter, or a device that
+                # always answers unusably is re-broadcast for the life of the
+                # session. This is what `info_version` is on the wire for.
+                self.logger.debug(
+                    "unusable device info",
+                    device_addr=device_addr,
+                    info_version=info.info_version,
+                )
+                return
+            self._device_info[device_addr] = info
+            self._info_forced.discard(device_addr)
+            # `.get()` rather than `in` then `[]`: this runs on the marilib RX
+            # thread while the cleanup thread deletes inactive entries, and the
+            # two-step form raises KeyError when a device times out between the
+            # check and the write.
+            cached_status = self.status_data.get(device_addr)
+            if cached_status is not None:
+                cached_status.info = info
+                # Clear the cap only when the reply actually resolves the
+                # staleness. Clearing on any reply means a device whose
+                # generation never lines up resets the counter every time and
+                # is asked again forever, which is the opposite of a cap.
+                if info.info_gen == cached_status.info_gen:
+                    self._info_backoff.pop(device_addr, None)
+                    self._info_next_try.pop(device_addr, None)
         elif packet.payload_type == PayloadType.SWARMIT_OTA_START_ACK:
             # A bootloader speaking the block protocol appends its version; a
             # legacy one sends the empty ack, which parses as version 1.
@@ -858,7 +1337,12 @@ class Controller:
         self.send_payload(int(device_addr, 16), PayloadLH2Capture())
 
     def _send_start_ota(
-        self, device_addr: str, devices_to_flash: set[str], firmware: bytes
+        self,
+        device_addr: str,
+        devices_to_flash: set[str],
+        firmware: bytes,
+        image_name: str = "",
+        image_version: str = "",
     ):
         def is_start_ota_acknowledged():
             if int(device_addr, 16) == BROADCAST_ADDRESS:
@@ -871,6 +1355,8 @@ class Controller:
         payload = PayloadOTAStart(
             fw_length=len(firmware),
             fw_chunk_count=len(self.chunks),
+            image_name=image_name,
+            image_version=image_version,
         )
         send_time = time.time()
         send = True
@@ -885,8 +1371,20 @@ class Controller:
             time.sleep(0.001)
             send = time.time() - send_time > self.settings.ota_timeout
 
-    def start_ota(self, firmware, devices=None) -> dict:
-        """Start the OTA process."""
+    def start_ota(
+        self,
+        firmware,
+        devices=None,
+        image_name: str = "",
+        image_version: str = "",
+    ) -> dict:
+        """Start the OTA process.
+
+        `image_name` and `image_version` are display-only labels the device
+        stores alongside the image and reports back. They are never the basis
+        of a decision - the digest is the identity - so leaving them empty
+        costs only readability.
+        """
         if devices is None:
             devices = self.settings.devices or []
         # Pad the image to a 4-byte boundary: the device writes flash a 32-bit
@@ -934,12 +1432,18 @@ class Controller:
         if not devices:
             print("Broadcast start ota notification...")
             self._send_start_ota(
-                addr_to_hex(BROADCAST_ADDRESS), devices_to_flash, firmware
+                addr_to_hex(BROADCAST_ADDRESS),
+                devices_to_flash,
+                firmware,
+                image_name,
+                image_version,
             )
         else:
             for addr in devices:
                 print(f"Sending start ota notification to {addr}...")
-                self._send_start_ota(addr, devices, firmware)
+                self._send_start_ota(
+                    addr, devices, firmware, image_name, image_version
+                )
                 time.sleep(0.2)
         return {
             "ota": self.start_ota_data,

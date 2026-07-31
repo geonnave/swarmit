@@ -16,12 +16,14 @@
 #include <nrf.h>
 
 #include "battery.h"
+#include "device_info.h"
 #include "ipc.h"
 #include "nvmc.h"
 #include "protocol.h"
 #include "sha256.h"
 #include "mari.h"
 #include "tz.h"
+#include "version.h"
 
 // DotBot-firmware includes
 #include "board_config.h"
@@ -30,6 +32,11 @@
 #include "timer.h"
 
 #include "../System/crash_latch.h"
+
+// The version string is reported over the air in a fixed 32-byte field, so a
+// tag that does not fit must fail the build rather than truncate on the wire.
+_Static_assert(sizeof(SWRMT_FW_VERSION) > 1, "SWRMT_FW_VERSION is empty");
+_Static_assert(sizeof(SWRMT_FW_VERSION) <= 32, "SWRMT_FW_VERSION exceeds the 32-byte wire field");
 
 #define SWARMIT_BASE_ADDRESS            (0x10000)
 #define SWARMIT_CONFIG_START_ADDRESS    (0x0103f800) // start of the last page (2KB) of the flash (0x01000000 + 0x00040000 - 0x800)
@@ -303,6 +310,28 @@ int main(void) {
     ipc_shared_data.device_type = SWRMT_DEVICE_TYPE_UNKNOWN;
 #endif
 
+    // Read the cause of the reset that brought us here, and publish it plus
+    // the device record before the network core comes up: the net core starts
+    // its 1 Hz status timer immediately, and everything it reports about this
+    // boot has to be settled before the first frame goes out. The fault
+    // snapshot is only valid when the previous run latched one before the
+    // watchdog fired.
+    uint32_t resetreas = NRF_RESET_S->RESETREAS;
+    NRF_RESET_S->RESETREAS = NRF_RESET_S->RESETREAS;
+
+    ipc_shared_data.crash_report.reset_reason = resetreas;
+    if (crash_latch.magic == CRASH_LATCH_MAGIC) {
+        ipc_shared_data.crash_report.fault   = (uint8_t)crash_latch.fault;
+        ipc_shared_data.crash_report.from_ns = (uint8_t)crash_latch.from_ns;
+        ipc_shared_data.crash_report.cfsr    = crash_latch.cfsr;
+        ipc_shared_data.crash_report.sfsr    = crash_latch.sfsr;
+        ipc_shared_data.crash_report.pc      = crash_latch.pc;
+        ipc_shared_data.crash_report.lr      = crash_latch.lr;
+    }
+    crash_latch.magic = 0;
+
+    device_info_init();
+
     // Start the network core
     release_network_core();
 
@@ -321,24 +350,6 @@ int main(void) {
 
     NVIC_ClearTargetState(SPIM4_IRQn);
     NVIC_ClearTargetState(IPC_IRQn);
-
-    // Check reset reason and switch to user image if reset was not triggered by any wdt timeout
-    uint32_t resetreas = NRF_RESET_S->RESETREAS;
-    NRF_RESET_S->RESETREAS = NRF_RESET_S->RESETREAS;
-
-    // Publish the cause of the reset that brought us here; the network core
-    // appends it to every status frame. The fault snapshot is only valid when
-    // the previous run latched one before the watchdog fired.
-    ipc_shared_data.crash_report.reset_reason = resetreas;
-    if (crash_latch.magic == CRASH_LATCH_MAGIC) {
-        ipc_shared_data.crash_report.fault   = (uint8_t)crash_latch.fault;
-        ipc_shared_data.crash_report.from_ns = (uint8_t)crash_latch.from_ns;
-        ipc_shared_data.crash_report.cfsr    = crash_latch.cfsr;
-        ipc_shared_data.crash_report.sfsr    = crash_latch.sfsr;
-        ipc_shared_data.crash_report.pc      = crash_latch.pc;
-        ipc_shared_data.crash_report.lr      = crash_latch.lr;
-    }
-    crash_latch.magic = 0;
 
     // Consume the boot intent set by whoever requested this reset (or random
     // RAM on first power-on, which won't match either magic value).
@@ -413,6 +424,7 @@ int main(void) {
 
         if (_bootloader_vars.ota_start_request) {
             _bootloader_vars.ota_start_request = false;
+            device_info_set_image_state(SWRMT_IMAGE_STATE_DOWNLOADING);
 
             if (_bootloader_vars.ota_require_erase) {
                 // Erase non secure flash
@@ -494,6 +506,15 @@ int main(void) {
             uint8_t ok = (memcmp(digest, (const void *)ipc_shared_data.ota.finalize_expected, SWRMT_OTA_SHA256_LENGTH) == 0) ? 1 : 0;
             ipc_shared_data.ota.finalize_ok = ok;
             printf("OTA finalize: image SHA256 %s\n", ok ? "OK" : "MISMATCH");
+
+            // Only now is it true that this image is what the bot runs, so
+            // only now does the record get rewritten. A mismatch leaves the
+            // record describing the previous image and reports the failure.
+            if (ok) {
+                device_info_commit_image();
+            } else {
+                device_info_fail_image(SWRMT_IMAGE_RESULT_INTEGRITY_FAIL);
+            }
 
             size_t length = 0;
             _bootloader_vars.notification_buffer[length++] = SWRMT_MSG_OTA_FINALIZE_RESP;

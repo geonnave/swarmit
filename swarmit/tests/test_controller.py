@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from unittest.mock import PropertyMock, patch
 
@@ -9,8 +10,15 @@ from swarmit.testbed.controller import (
     Chunk,
     Controller,
     ControllerSettings,
+    DeviceInfo,
+    NodeStatus,
     ResetLocation,
     StaleBootloaderError,
+    StartOtaData,
+    format_reset_cause,
+    format_uptime,
+    generate_info,
+    image_mismatches,
 )
 from swarmit.testbed.logger import setup_logging
 from swarmit.testbed.ota import BlockOTASettings
@@ -762,3 +770,521 @@ def test_controller_chunk_repr():
         repr(chunk)
         == "{'index': 42, 'size': 128, 'acked': True, 'retries': 2}"
     )
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_REFRESH_INTERVAL", 0.05)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_device_info_fetched_once_per_change():
+    """The generation counter is what bounds device-info traffic.
+
+    A bot is read once when first seen and then never again until its
+    generation moves, no matter how many status frames arrive in between.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(
+        address=0x01,
+        adapter=test_adapter,
+        info_gen=3,
+        image_name="lakers-sandbox.bin",
+        image_version="0.9.0",
+    )
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+    assert controller.status_data[addr] is not None
+
+    # First read lands on its own, with no explicit request from the caller.
+    deadline = time.time() + 3
+    while time.time() < deadline and not controller.status_data[addr].info:
+        time.sleep(0.01)
+    info = controller.status_data[addr].info
+    assert info is not None
+    assert info.info_gen == 3
+    assert info.image_name == "lakers-sandbox.bin"
+    assert info.image_version == "0.9.0"
+    assert info.image_label == "lakers-sandbox.bin"
+
+    # Many more status frames go by; none of them costs a device-info round.
+    asked_once = node.device_info_requests
+    assert asked_once >= 1
+    time.sleep(0.8)
+    assert node.device_info_requests == asked_once
+    assert controller.stale_device_info() == []
+
+    # The bot reboots: the counter moves and exactly one more read follows.
+    node.info_gen = 4
+    node.boot_count = 4
+    deadline = time.time() + 3
+    while (
+        time.time() < deadline
+        and controller.status_data[addr].info.info_gen != 4
+    ):
+        time.sleep(0.01)
+    assert controller.status_data[addr].info.info_gen == 4
+    assert controller.status_data[addr].info.boot_count == 4
+    assert node.device_info_requests == asked_once + 1
+
+    node.stop()
+    controller.terminate()
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_REFRESH_INTERVAL", 0.02)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_firmware_without_device_info_is_never_asked():
+    """A zero generation counter identifies firmware that cannot answer.
+
+    That is a property of the device rather than a guess from a timeout, so it
+    is recognised on the first status frame and never costs a request - where
+    an attempt cap would have spent several broadcasts learning it, every
+    session.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(
+        address=0x02,
+        adapter=test_adapter,
+        info_gen=0,
+        answers_device_info=False,
+    )
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    assert controller.stale_device_info() == []
+    for _ in range(3):
+        controller._info_last_broadcast = 0.0
+        controller._refresh_stale_device_info()
+    assert node.device_info_requests == 0
+    assert controller.status_data[addr].info is None
+
+    # Firmware that does report a counter is asked, even having been quiet.
+    node.info_gen = 9
+    deadline = time.time() + 3
+    while (
+        time.time() < deadline and controller.status_data[addr].info_gen != 9
+    ):
+        time.sleep(0.01)
+    assert controller.stale_device_info() == [addr]
+
+    node.stop()
+    controller.terminate()
+
+
+def _node_with_image(digest: str, name: str = "", gen: int = 1):
+    """A cached status entry carrying a device-info block, for the
+    majority-mismatch tests. Built directly rather than over the mock
+    transport: what is under test is the comparison, not the wire."""
+    return NodeStatus(
+        info_gen=gen,
+        info=DeviceInfo(info_gen=gen, image_digest=digest, image_name=name),
+    )
+
+
+def test_image_mismatches_all_agree():
+    data = {
+        "AA": _node_with_image("3f9a2c81d4e5b607"),
+        "BB": _node_with_image("3f9a2c81d4e5b607"),
+        "CC": _node_with_image("3f9a2c81d4e5b607"),
+    }
+    majority, odd = image_mismatches(data)
+    assert majority == "3f9a2c81d4e5b607"
+    assert odd == []
+
+
+def test_image_mismatches_flags_the_odd_one_out():
+    data = {
+        "AA": _node_with_image("3f9a2c81d4e5b607", "lakers-sandbox"),
+        "BB": _node_with_image("3f9a2c81d4e5b607", "lakers-sandbox"),
+        "CC": _node_with_image("9e4c1a70d2b83f56", "move-and-blink"),
+    }
+    majority, odd = image_mismatches(data)
+    assert majority == "3f9a2c81d4e5b607"
+    assert [addr for addr, _ in odd] == ["CC"]
+    assert odd[0][1].image_name == "move-and-blink"
+
+
+def test_image_mismatches_compares_digests_not_names():
+    # Two bots claiming the same name over different bytes is exactly why the
+    # digest is the identity and the name is decoration.
+    data = {
+        "AA": _node_with_image("1111111111111111", "app.bin"),
+        "BB": _node_with_image("1111111111111111", "app.bin"),
+        "CC": _node_with_image("2222222222222222", "app.bin"),
+    }
+    majority, odd = image_mismatches(data)
+    assert majority == "1111111111111111"
+    assert [addr for addr, _ in odd] == ["CC"]
+
+
+def test_image_mismatches_ignores_devices_that_have_not_answered():
+    # Unknown is not the same as different: a bot that has not reported device
+    # info must not be counted as disagreeing, or every rollout would show a
+    # spurious callout while the fleet is still being read.
+    data = {
+        "AA": _node_with_image("3f9a2c81d4e5b607"),
+        "BB": _node_with_image("3f9a2c81d4e5b607"),
+        "CC": NodeStatus(),  # never answered
+    }
+    majority, odd = image_mismatches(data)
+    assert majority == "3f9a2c81d4e5b607"
+    assert odd == []
+
+
+def test_image_mismatches_needs_at_least_two_known_devices():
+    # A single bot is trivially its own majority; calling that a match or a
+    # mismatch is meaningless either way.
+    assert image_mismatches({"AA": _node_with_image("aa")}) == ("", [])
+    assert image_mismatches({}) == ("", [])
+
+
+def test_image_label_distinguishes_no_image_from_unknown():
+    # Found on hardware: a bot that has never been flashed over the air
+    # reports a zeroed record, which read as an image whose digest was
+    # sixteen zeros.
+    blank = DeviceInfo(image_digest="0" * 16, image_size=0)
+    assert blank.has_image is False
+    assert blank.image_label == "none"
+
+    real = DeviceInfo(image_digest="d1e1d9804851a855", image_size=9844)
+    assert real.has_image is True
+    assert real.image_label == "d1e1d9804851a855"
+    assert (
+        DeviceInfo(
+            image_digest="d1e1d9804851a855",
+            image_size=9844,
+            image_name="sample.bin",
+        ).image_label
+        == "sample.bin"
+    )
+
+
+def test_format_uptime():
+    assert format_uptime(41) == "41s"
+    assert format_uptime(204) == "3m 24s"
+    assert format_uptime(4324) == "1h 12m 04s"
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_TIMEOUT", 1.0)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_explicit_fetch_asks_even_when_the_generation_matches():
+    """`info` must re-read, not trust the cache.
+
+    Not everything in the block is inventory: `uptime_s` moves every second,
+    so an unchanged generation counter does not mean the values are still
+    true. An explicit fetch that short-circuits on a fresh-looking cache
+    renders the uptime sampled at the previous fetch.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(address=0x11, adapter=test_adapter, info_gen=7)
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    controller.fetch_device_info([addr])
+    first = node.device_info_requests
+    assert first >= 1
+    assert controller.status_data[addr].info is not None
+
+    # Generation has not moved, so the background sweep would correctly stay
+    # quiet - but an explicit ask must still go out.
+    assert controller.stale_device_info() == []
+    controller.fetch_device_info([addr])
+    assert node.device_info_requests > first
+    # And the demand is released, so the sweep does not keep broadcasting.
+    assert controller._info_forced == set()
+
+    node.stop()
+    controller.terminate()
+
+
+def test_device_info_reply_survives_a_concurrent_timeout():
+    """The RX thread must not raise when a device times out mid-callback.
+
+    `cleanup_inactive` deletes entries from another thread; a check-then-act
+    on status_data raises KeyError in that window.
+    """
+    from unittest.mock import MagicMock
+
+    from dotbot_utils.protocol import Packet
+
+    from swarmit.testbed.protocol import PayloadDeviceInfo
+
+    controller = Controller.__new__(Controller)
+    controller.logger = MagicMock()
+    controller.settings = ControllerSettings()
+    controller.status_data = {}
+    controller._device_info = {}
+    controller._info_backoff = {}
+    controller._info_next_try = {}
+    controller._info_gen_seen = {}
+    controller._info_forced = set()
+    controller._block_transfer = None
+    controller.start_ota_data = StartOtaData()
+    controller._ota_versions = {}
+    controller._log_event_listeners = []
+    controller._log_listeners_lock = threading.Lock()
+
+    header = MagicMock()
+    header.source = 0x22
+    packet = Packet.from_payload(PayloadDeviceInfo(info_version=1, info_gen=3))
+    # status_data is deliberately empty: the device timed out between the
+    # request going out and this reply arriving.
+    controller.on_frame_received(header, packet)
+
+    assert controller._device_info["00000022"].info_gen == 3
+
+
+def test_reset_reason_row_drops_a_redundant_decode():
+    """The raw row's decode should say more than the friendly cause, or nothing.
+
+    A single-bit RESETREAS decodes to exactly the friendly label, so printing
+    both put "soft-reset" under "soft-reset". A multi-bit value genuinely says
+    more and keeps its decode.
+    """
+    from swarmit.testbed.protocol import decode_reset_reason
+
+    single = NodeStatus(reset_reason=0x08)
+    assert decode_reset_reason(0x08) == format_reset_cause(single)
+
+    multi = NodeStatus(reset_reason=0x1C)
+    assert decode_reset_reason(0x1C) == "ctrl-ap+soft-reset+lockup"
+    assert format_reset_cause(multi) == "lockup"
+    assert decode_reset_reason(0x1C) != format_reset_cause(multi)
+
+
+def test_info_panel_does_not_repeat_the_boot_reason():
+    """The Matter vocabulary is for a bridge, not for this panel.
+
+    `Last reset` and `reset_reason` already answer why it booted, from the
+    authoritative register, so a third coarse rendering is noise.
+    """
+    from rich.console import Console
+
+    data = {
+        "AA": NodeStatus(
+            reset_reason=0x08,
+            last_updated_at=time.time(),
+            info_gen=4,
+            info=DeviceInfo(info_gen=4, boot_count=4, uptime_s=12),
+        )
+    }
+    console = Console(width=120, no_color=True)
+    with console.capture() as cap:
+        console.print(generate_info(data, []))
+    out = cap.get()
+
+    assert "boot #4" in out
+    assert "SoftwareReset" not in out
+    # The friendly cause still appears exactly once.
+    assert out.count("soft-reset") == 1
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_TIMEOUT", 0.4)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_fetch_accepts_a_lowercase_device_argument():
+    """`-d` is user input; status_data keys are upper-cased by addr_to_hex.
+
+    Intersecting the two without normalising made the loop exit on the first
+    pass without sending anything.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(address=0xAB, adapter=test_adapter, info_gen=2)
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    controller.fetch_device_info([addr.lower()])
+    assert node.device_info_requests >= 1
+
+    node.stop()
+    controller.terminate()
+
+
+def test_unusable_device_info_is_dropped_and_does_not_reset_backoff():
+    """A reply that cannot resolve staleness must not reset the attempt cap.
+
+    A truncated body zero-fills to `info_version = 0`. Caching it, or clearing
+    the counter for it, would leave a device that always answers unusably being
+    re-broadcast for the life of the session - a cap that never caps.
+    """
+    from unittest.mock import MagicMock
+
+    from dotbot_utils.protocol import Packet
+
+    from swarmit.testbed.protocol import PayloadDeviceInfo
+
+    controller = Controller.__new__(Controller)
+    controller.logger = MagicMock()
+    controller.settings = ControllerSettings()
+    controller.status_data = {"00000033": NodeStatus(info_gen=7)}
+    controller._device_info = {}
+    controller._info_backoff = {"00000033": 4.0}
+    controller._info_next_try = {"00000033": 0.0}
+    controller._info_gen_seen = {}
+    controller._info_forced = set()
+    controller._block_transfer = None
+    controller.start_ota_data = StartOtaData()
+    controller._ota_versions = {}
+    controller._log_event_listeners = []
+    controller._log_listeners_lock = threading.Lock()
+
+    header = MagicMock()
+    header.source = 0x33
+    controller.on_frame_received(
+        header, Packet.from_payload(PayloadDeviceInfo(info_version=0))
+    )
+
+    assert "00000033" not in controller._device_info
+    # The backoff survives, so an unusable reply does not reset the schedule.
+    assert controller._info_backoff["00000033"] == 4.0
+
+
+def test_matching_generation_clears_the_backoff():
+    from unittest.mock import MagicMock
+
+    from dotbot_utils.protocol import Packet
+
+    from swarmit.testbed.protocol import PayloadDeviceInfo
+
+    controller = Controller.__new__(Controller)
+    controller.logger = MagicMock()
+    controller.settings = ControllerSettings()
+    controller.status_data = {"00000044": NodeStatus(info_gen=7)}
+    controller._device_info = {}
+    controller._info_backoff = {"00000044": 4.0}
+    controller._info_next_try = {"00000044": 0.0}
+    controller._info_gen_seen = {}
+    controller._info_forced = set()
+    controller._block_transfer = None
+    controller.start_ota_data = StartOtaData()
+    controller._ota_versions = {}
+    controller._log_event_listeners = []
+    controller._log_listeners_lock = threading.Lock()
+
+    header = MagicMock()
+    header.source = 0x44
+    controller.on_frame_received(
+        header,
+        Packet.from_payload(PayloadDeviceInfo(info_version=1, info_gen=7)),
+    )
+
+    assert controller._device_info["00000044"].info_gen == 7
+    assert "00000044" not in controller._info_backoff
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_REFRESH_INTERVAL", 1.0)
+@patch("swarmit.testbed.controller.DEVICE_INFO_BACKOFF_MAX", 8.0)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_unanswered_device_backs_off_but_is_never_written_off():
+    """A device that should answer and does not is asked less, not never.
+
+    It reports a real generation counter, so it is not old firmware - it is
+    busy. Giving up would leave it showing as unknown until something else
+    moved its counter; backing off bounds the traffic instead.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(
+        address=0x55,
+        adapter=test_adapter,
+        info_gen=4,
+        answers_device_info=False,
+    )
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    seen = []
+    for _ in range(5):
+        controller._info_last_broadcast = 0.0
+        controller._info_next_try[addr] = 0.0  # pretend the wait elapsed
+        controller._refresh_stale_device_info()
+        seen.append(controller._info_backoff[addr])
+
+    # Doubles, then holds at the ceiling rather than growing without bound.
+    assert seen == [1.0, 2.0, 4.0, 8.0, 8.0]
+    # Still a candidate: it is never written off the way a cap would.
+    controller._info_next_try[addr] = 0.0
+    assert controller.stale_device_info() == [addr]
+
+    node.stop()
+    controller.terminate()
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_REFRESH_INTERVAL", 1.0)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_a_generation_change_cancels_the_backoff():
+    """A reboot or a flash is exactly when the answer is wanted soonest."""
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(
+        address=0x66,
+        adapter=test_adapter,
+        info_gen=4,
+        answers_device_info=False,
+    )
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    controller._info_last_broadcast = 0.0
+    controller._refresh_stale_device_info()
+    assert controller._info_backoff[addr] > 0
+
+    node.info_gen = 5
+    deadline = time.time() + 3
+    while (
+        time.time() < deadline and controller.status_data[addr].info_gen != 5
+    ):
+        time.sleep(0.01)
+
+    assert addr not in controller._info_backoff
+    assert controller.stale_device_info() == [addr]
+
+    node.stop()
+    controller.terminate()

@@ -3,6 +3,7 @@
 import os
 import threading
 import time
+from pathlib import Path
 
 import click
 from dotbot_utils.serial_interface import (
@@ -469,9 +470,22 @@ def reset(ctx, locations):
     show_default=True,
     help="Number of retries for each OTA message (start or chunk) transfer.",
 )
+@click.option(
+    "--image-version",
+    default="",
+    help=(
+        "Version label to store with the image and show in status/info, "
+        'e.g. "0.9.0-12-g1a2b3c4". Display only - bots are compared by '
+        "image digest, so leaving this empty costs only readability. "
+        "Distinct from --fw-version, which selects a released platform "
+        "artifact to flash."
+    ),
+)
 @click.argument("firmware", type=click.File(mode="rb"), required=False)
 @click.pass_context
-def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
+def flash(
+    ctx, yes, start, ota_timeout, ota_max_retries, image_version, firmware
+):
     """Flash a firmware to the robots.
 
     Streams per-chunk progress via the daemon's /flash/stream SSE
@@ -479,6 +493,10 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
     the controller's transfer_data otherwise. CLI rendering is the same
     either way. `--ota-timeout` and `--ota-max-retries` are sent as
     per-flash overrides in both modes.
+
+    The image is labelled with the firmware's filename and, if given,
+    `--image-version`. Bots report both back, so `swarm status` can show
+    which image each one is running.
     """
     console = Console()
     if firmware is None:
@@ -508,6 +526,10 @@ def flash(ctx, yes, start, ota_timeout, ota_max_retries, firmware):
             devices=settings.devices if settings.devices else None,
             ota_timeout=ota_timeout,
             ota_max_retries=ota_max_retries,
+            # The filename is the name an operator already thinks in, so it
+            # is the default label rather than something to be typed twice.
+            image_name=Path(getattr(firmware, "name", "")).name,
+            image_version=image_version,
         )
         progress = None
         per_device_acked: dict[str, int] = {}
@@ -635,18 +657,31 @@ def status(ctx, watch):
 
 
 @main.command()
+@click.option(
+    "--raw",
+    is_flag=True,
+    help=(
+        "Also dump the wire bytes of the status frame and the device-info "
+        "reply, offset-prefixed. Offsets match the field tables in "
+        "doc/wire-protocol.md."
+    ),
+)
 @click.pass_context
-def info(ctx):
+def info(ctx, raw):
     """Show full detail for the selected device(s).
 
     Everything from the status packet plus the raw crash report (decoded
-    reset reason, fault status registers, and faulting PC/LR). Scope it
-    with the group's -d/--devices option, e.g. `swarm -d <addr> info`;
-    with no -d it shows every known device.
+    reset reason, fault status registers, and faulting PC/LR), and what the
+    device reports it is running: image, sandbox firmware versions,
+    calibration and uptime. Scope it with the group's -d/--devices option,
+    e.g. `swarm -d <addr> info`; with no -d it shows every known device.
     """
     settings = ctx.obj["settings"]
     with build_client(settings, no_server=ctx.obj["no_server"]) as client:
-        print(generate_info(client.status(), settings.devices))
+        # Ask rather than wait for the background sweep: `info` is the
+        # command an operator runs precisely when they want it now.
+        client.refresh_device_info(settings.devices or None)
+        print(generate_info(client.status(), settings.devices, show_raw=raw))
 
 
 @main.command()

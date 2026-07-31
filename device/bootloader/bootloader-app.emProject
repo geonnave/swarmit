@@ -3,6 +3,8 @@
   <project Name="bootloader">
     <configuration
       Name="Common"
+      pre_build_command="&quot;$(ProjectDir)/../../scripts/gen-version.sh&quot; &quot;$(ProjectDir)/Source/version_generated.h&quot;"
+      pre_build_command_control="Always Run"
       project_dependencies="00bsp_dotbot_lh2(bsp);00bsp_gpio(bsp);00bsp_saadc(bsp);00bsp_timer(bsp);00crypto_sha256(crypto)"
       project_directory=""
       project_type="Executable" />
@@ -17,6 +19,8 @@
       <file file_name="Source/cmse_implib.c" />
       <file file_name="Source/cmse_implib.h" />
       <file file_name="Source/device.h" />
+      <file file_name="Source/device_info.c" />
+      <file file_name="Source/device_info.h" />
       <file file_name="Source/ipc.c" />
       <file file_name="Source/ipc.h" />
       <file file_name="Source/lh2_calibration.h" />

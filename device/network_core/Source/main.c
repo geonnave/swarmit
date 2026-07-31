@@ -18,6 +18,7 @@
 #include "protocol.h"
 #include "rng.h"
 #include "sha256.h"
+#include "version.h"
 #include "mr_gpio.h"
 
 // Mira includes
@@ -26,6 +27,12 @@
 #include "models.h"
 #include "mac.h"
 #include "mari.h"
+
+// The version string is reported over the air in a fixed 32-byte field, so a
+// tag that does not fit must fail the build rather than truncate on the wire.
+_Static_assert(sizeof(SWRMT_FW_VERSION) > 1, "SWRMT_FW_VERSION is empty");
+_Static_assert(sizeof(SWRMT_FW_VERSION) <= SWRMT_INFO_STRING_LEN,
+               "SWRMT_FW_VERSION exceeds the 32-byte wire field");
 
 #define NETCORE_MAIN_TIMER                  (0)
 
@@ -52,6 +59,8 @@ typedef struct {
     bool        data_received;
     bool        send_status;
     uint8_t     req_buffer[255];
+    uint8_t     req_length;     ///< bytes actually received into req_buffer; fields appended to a message later than its first release are only present when the length says so
+    uint32_t    uptime_s;       ///< incremented by the 1 Hz status tick
     uint8_t     notification_buffer[255];
     ipc_req_t   ipc_req;
     bool        ipc_log_received;
@@ -100,7 +109,9 @@ static void _handle_packet(uint64_t dst_address, uint8_t *packet, uint8_t length
     }
 
     if (((packet_type >= SWRMT_MSG_STATUS) && (packet_type <= SWRMT_MSG_OTA_CHUNK)) || (packet_type == SWRMT_MSG_LH2_CALIBRATION) || (packet_type == SWRMT_MSG_LH2_CAPTURE) ||
-        (packet_type == SWRMT_MSG_OTA_BLOCK_REPORT_REQ) || (packet_type == SWRMT_MSG_OTA_FINALIZE)) {
+        (packet_type == SWRMT_MSG_OTA_BLOCK_REPORT_REQ) || (packet_type == SWRMT_MSG_OTA_FINALIZE) ||
+        (packet_type == SWRMT_MSG_REQUEST_MESSAGE)) {
+        _app_vars.req_length = length;
         _app_vars.req_received = true;
         return;
     }
@@ -177,7 +188,23 @@ static void _load_config(void) {
         }
         ipc_shared_data.lh2_calibration.homography_count = _app_vars.config.homography_count;
         _app_vars.lh2_calibration_ready = true;
+
+        // Report calibration as part of the device inventory. Position alone
+        // cannot answer this: (0, 0) reads the same for "uncalibrated" and
+        // "at the origin".
+        ipc_shared_data.device_info.lh2_homography_count = (uint8_t)_app_vars.config.homography_count;
+        ipc_shared_data.device_info.lh2_flags = SWRMT_LH2_FLAG_VALID | SWRMT_LH2_FLAG_FROM_FLASH;
     }
+}
+
+/// Copy a fixed-width string out of shared memory. memcpy would need the
+/// volatile qualifier cast away, which is the cast worth not writing on a
+/// buffer the other core also touches.
+static void _copy_from_shared(char *dst, const volatile char *src, size_t cap) {
+    for (size_t i = 0; i < cap; i++) {
+        dst[i] = src[i];
+    }
+    dst[cap - 1] = '\0';
 }
 
 uint64_t _deviceid(void) {
@@ -185,6 +212,10 @@ uint64_t _deviceid(void) {
 }
 
 static void _send_status(void) {
+    // Also the uptime clock: this fires once a second for the life of the
+    // device, so counting ticks here needs no timer of its own and no 32-bit
+    // microsecond counter that would wrap every 71 minutes.
+    _app_vars.uptime_s++;
     _app_vars.send_status = true;
 }
 
@@ -218,6 +249,15 @@ static void _commit_config_and_reboot(void) {
 
 int main(void) {
     _app_vars.device_id = _deviceid();
+
+    // Publish this core's build stamp before anything can be asked of it. The
+    // application core fills the rest of device_info; these are the only
+    // fields the net core owns, plus the LH2 pair _load_config sets.
+    for (size_t i = 0; i < SWRMT_INFO_STRING_LEN; i++) {
+        ipc_shared_data.device_info.net_version[i] =
+            (i < sizeof(SWRMT_FW_VERSION)) ? SWRMT_FW_VERSION[i] : '\0';
+    }
+
     _load_config();
 
     NRF_IPC_NS->INTENSET                             = (1 << IPC_CHAN_REQ) | (1 << IPC_CHAN_LOG_EVENT);
@@ -268,8 +308,24 @@ int main(void) {
             length += sizeof(uint16_t);
             memcpy(&_app_vars.notification_buffer[length], (void *)&ipc_shared_data.current_position, sizeof(position_2d_t));
             length += sizeof(position_2d_t);
+            // The crash report is inventory by the same rule that puts image
+            // and firmware versions in DEVICE_INFO instead: it is latched once
+            // at boot and never changes during a run, so these 22 bytes
+            // describe the previous boot rather than the current state, and
+            // they are most of the frame. It rides the periodic frame anyway
+            // for one reason: a crash report is wanted precisely when a bot is
+            // unhealthy and barely reachable, and a 36-byte frame sent every
+            // second gets through where a 156-byte on-request reply does not.
+            // Airtime is not the reason - the slot is sized for the maximum
+            // packet whatever the payload - so if that reachability argument
+            // stops holding, nothing else keeps this here.
             memcpy(&_app_vars.notification_buffer[length], (void *)&ipc_shared_data.crash_report, sizeof(ipc_crash_report_t));
             length += sizeof(ipc_crash_report_t);
+            // Appended last so a host that predates this field still parses
+            // the frame positionally. One byte is what makes the whole device
+            // info exchange event-driven: the controller compares it against
+            // its cache and only asks when it differs.
+            _app_vars.notification_buffer[length++] = ipc_shared_data.device_info.info_gen;
             mari_node_tx_payload(_app_vars.notification_buffer, length, &SWARMIT_TX_DEFAULT);
         }
 
@@ -320,6 +376,21 @@ int main(void) {
                     ipc_shared_data.ota.block_index = 0;
                     ipc_shared_data.ota.received_mask = 0;
                     ipc_shared_data.ota.finalize_ok = 0;
+                    // Stage the image name and version for the app core to
+                    // promote into the device record once the whole-image
+                    // SHA256 matches. They were appended to this message after
+                    // its first release, so a shorter packet from an older
+                    // controller means "not sent" - reading them out of the
+                    // buffer anyway would report whatever the previous request
+                    // left there. Clearing them is what makes the host fall
+                    // back to the digest instead of showing a stale name.
+                    bool named = (_app_vars.req_length >= 1 + SWRMT_OTA_START_NAMED_SIZE);
+                    for (size_t i = 0; i < SWRMT_INFO_STRING_LEN; i++) {
+                        ipc_shared_data.ota.pending_name[i] = named ? pkt->image_name[i] : '\0';
+                        ipc_shared_data.ota.pending_version[i] = named ? pkt->image_version[i] : '\0';
+                    }
+                    ipc_shared_data.ota.pending_name[SWRMT_INFO_STRING_LEN - 1] = '\0';
+                    ipc_shared_data.ota.pending_version[SWRMT_INFO_STRING_LEN - 1] = '\0';
                     mutex_unlock();
                     printf("OTA Start request received (size: %u, chunks: %u)\n", ipc_shared_data.ota.image_size, ipc_shared_data.ota.chunk_count);
                     NRF_IPC_NS->TASKS_SEND[IPC_CHAN_OTA_START] = 1;
@@ -408,6 +479,51 @@ int main(void) {
                     memcpy((uint8_t *)ipc_shared_data.ota.finalize_expected, pkt->sha, SWRMT_OTA_SHA256_LENGTH);
                     mutex_unlock();
                     NRF_IPC_NS->TASKS_SEND[IPC_CHAN_OTA_FINALIZE] = 1;
+                } break;
+                case SWRMT_MSG_REQUEST_MESSAGE:
+                {
+                    if (_app_vars.req_length < 1 + sizeof(swrmt_request_message_pkt_t)) {
+                        break;
+                    }
+                    const swrmt_request_message_pkt_t *pkt = (const swrmt_request_message_pkt_t *)req->data;
+                    if (pkt->msg_id != SWRMT_MSG_DEVICE_INFO_RESP) {
+                        // Generic by construction: a future query adds a
+                        // msg_id here rather than another message pair.
+                        break;
+                    }
+
+                    // Answered here rather than through an IPC round trip: the
+                    // application core has already published everything, and
+                    // the reply goes out in this bot's own uplink cell, the
+                    // same pattern OTA_BLOCK_REPORT_REQ uses. A broadcast
+                    // request is therefore answered by the whole fleet within
+                    // one slotframe.
+                    swrmt_device_info_pkt_t info = { 0 };
+                    info.info_version = SWRMT_DEVICE_INFO_VERSION;
+                    // Sampled first, before any field it describes - see
+                    // _bump_generation() in the bootloader for why this order
+                    // is what makes the handshake self-correcting.
+                    info.info_gen = ipc_shared_data.device_info.info_gen;
+                    info.boot_count = ipc_shared_data.device_info.boot_count;
+                    info.uptime_s = _app_vars.uptime_s;
+                    info.image_state = ipc_shared_data.device_info.image_state;
+                    info.image_result = ipc_shared_data.device_info.image_result;
+                    info.image_size = ipc_shared_data.device_info.image_size;
+                    for (size_t i = 0; i < SWRMT_IMAGE_DIGEST_LEN; i++) {
+                        info.image_digest[i] = ipc_shared_data.device_info.image_digest[i];
+                    }
+                    _copy_from_shared(info.bl_version, ipc_shared_data.device_info.bl_version, SWRMT_INFO_STRING_LEN);
+                    _copy_from_shared(info.net_version, ipc_shared_data.device_info.net_version, SWRMT_INFO_STRING_LEN);
+                    _copy_from_shared(info.image_name, ipc_shared_data.device_info.image_name, SWRMT_INFO_STRING_LEN);
+                    _copy_from_shared(info.image_version, ipc_shared_data.device_info.image_version, SWRMT_INFO_STRING_LEN);
+                    info.lh2_homography_count = ipc_shared_data.device_info.lh2_homography_count;
+                    info.lh2_flags = ipc_shared_data.device_info.lh2_flags;
+
+                    size_t length = 0;
+                    _app_vars.notification_buffer[length++] = SWRMT_MSG_DEVICE_INFO_RESP;
+                    memcpy(&_app_vars.notification_buffer[length], &info, sizeof(info));
+                    length += sizeof(info);
+                    mari_node_tx_payload(_app_vars.notification_buffer, length, &SWARMIT_TX_DEFAULT);
                 } break;
                 case SWRMT_MSG_LH2_CALIBRATION:
                 {

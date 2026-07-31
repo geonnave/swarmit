@@ -31,13 +31,40 @@ type DeviceType =
   | "nRF5340DK"
   | "nRF52840DK";
 
+// What a bot reports it is running. Absent until the bot has answered a
+// device-info request, and permanently absent on firmware that predates the
+// message, so every consumer has to tolerate null.
+export type DeviceInfoData = {
+  info_gen: number;
+  boot_count: number;
+  uptime_s: number;
+  boot_reason: number;
+  bl_version: string;
+  net_version: string;
+  image_state: number;
+  image_result: number;
+  image_size: number;
+  image_digest: string;
+  image_name: string;
+  image_version: string;
+  lh2_homography_count: number;
+  lh2_flags: number;
+};
+
 export type DotBotData = {
   device: DeviceType;
   status: StatusType;
   battery: number;
   pos_x: number;
   pos_y: number;
+  info_gen?: number;
+  info?: DeviceInfoData | null;
 };
+
+// The digest is the identity; the name is display-only and a bot flashed by
+// an older controller simply has none.
+export const imageLabel = (bot: DotBotData): string =>
+  bot.info ? bot.info.image_name || bot.info.image_digest.slice(0, 16) || "-" : "-";
 
 type SettingsType = {
   network_id: string;

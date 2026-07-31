@@ -254,7 +254,9 @@ def test_flash_when_device_not_ready(client):
 
 
 def test_flash_missing_start_ota(client, monkeypatch):
-    def fake_start_ota(self, fw, devices=None):
+    def fake_start_ota(
+        self, fw, devices=None, image_name="", image_version=""
+    ):
         return {"missed": ["00000001"], "acked": []}
 
     monkeypatch.setattr(
@@ -361,3 +363,31 @@ def test_frontend_not_exists(client, capsys, monkeypatch):
     monkeypatch.setattr("os.path.isdir", lambda path: False)
     mount_frontend(client.app)
     assert "Warning: dashboard directory not found" in capsys.readouterr().out
+
+
+def test_events_snapshot_drops_the_device_info_wire_bytes():
+    """310 hex characters per device, twice a second, that nothing reads.
+
+    `/status` keeps them because `info --raw` reads that route once per
+    invocation; the stream cannot afford them.
+    """
+    from swarmit.testbed.controller import DeviceInfo, NodeStatus
+    from swarmit.testbed.webserver import _serialise_node
+
+    node = NodeStatus(info=DeviceInfo(info_gen=3, raw="8f01" * 77))
+
+    streamed = _serialise_node(node, include_device_info_raw=False)
+    assert streamed["info"]["raw"] == ""
+    # Everything else survives - only the hex blob is dropped.
+    assert streamed["info"]["info_gen"] == 3
+
+    fetched = _serialise_node(node)
+    assert fetched["info"]["raw"] == "8f01" * 77
+
+
+def test_serialise_node_tolerates_a_device_that_never_answered():
+    from swarmit.testbed.controller import NodeStatus
+    from swarmit.testbed.webserver import _serialise_node
+
+    out = _serialise_node(NodeStatus(), include_device_info_raw=False)
+    assert out["info"] is None
