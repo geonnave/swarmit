@@ -415,23 +415,46 @@ def image_mismatches(status_data) -> tuple[str, list[tuple[str, DeviceInfo]]]:
     return majority, odd
 
 
+def _split_dirty(version: str) -> tuple[str, bool]:
+    """Separate a `git describe --dirty` version from its dirty marker."""
+    if version.endswith("-dirty"):
+        return version[: -len("-dirty")], True
+    return version, False
+
+
 def format_sandbox_fw(info: DeviceInfo | None) -> str:
     """One column for the bootloader and net-core versions.
 
     They are built and flashed together, so the two agreeing is the normal
-    case and printing both would cost width on every row to say the same
-    thing twice. Collapse them when they match, and show both when they do
-    not - a disagreement means a half-finished flash, which is the reason to
-    have the column at all.
+    case and printing both in full would spend ~50 columns on every row to
+    say the same thing twice. Collapse them when they agree and show both
+    when they do not - a real disagreement means a half-finished flash, which
+    is the reason to have the column at all.
+
+    `-dirty` is build state rather than a different version, so it is compared
+    out and reported as a flag. Otherwise a net core built from an uncommitted
+    tree - the normal case at the bench - would look like a version mismatch
+    and defeat the collapse on every row.
     """
     if info is None:
         return "-"
     bl, net = info.bl_version, info.net_version
     if not bl and not net:
         return "-"
-    if bl == net:
-        return bl
-    return f"[yellow]bl {bl or '?'} / net {net or '?'}"
+
+    bl_base, bl_dirty = _split_dirty(bl)
+    net_base, net_dirty = _split_dirty(net)
+    if bl_base != net_base:
+        return f"[yellow]{bl or '?'} / {net or '?'}"
+
+    version = bl_base or net_base
+    if bl_dirty and net_dirty:
+        return f"{version} [yellow](dirty)"
+    if bl_dirty:
+        return f"{version} [yellow](bl dirty)"
+    if net_dirty:
+        return f"{version} [yellow](net dirty)"
+    return version
 
 
 def generate_status(status_data, devices=[], status_message="found"):
@@ -476,7 +499,7 @@ def generate_status(status_data, devices=[], status_message="found"):
         justify="center",
     )
     table.add_column(
-        "Sandbox fw",
+        "Sandbox fw (bl / net)",
         style="cyan",
         justify="center",
     )
