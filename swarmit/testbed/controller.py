@@ -415,6 +415,25 @@ def image_mismatches(status_data) -> tuple[str, list[tuple[str, DeviceInfo]]]:
     return majority, odd
 
 
+def format_sandbox_fw(info: DeviceInfo | None) -> str:
+    """One column for the bootloader and net-core versions.
+
+    They are built and flashed together, so the two agreeing is the normal
+    case and printing both would cost width on every row to say the same
+    thing twice. Collapse them when they match, and show both when they do
+    not - a disagreement means a half-finished flash, which is the reason to
+    have the column at all.
+    """
+    if info is None:
+        return "-"
+    bl, net = info.bl_version, info.net_version
+    if not bl and not net:
+        return "-"
+    if bl == net:
+        return bl
+    return f"[yellow]bl {bl or '?'} / net {net or '?'}"
+
+
 def generate_status(status_data, devices=[], status_message="found"):
     data = {
         addr: device_data
@@ -457,6 +476,11 @@ def generate_status(status_data, devices=[], status_message="found"):
         justify="center",
     )
     table.add_column(
+        "Sandbox fw",
+        style="cyan",
+        justify="center",
+    )
+    table.add_column(
         "Last reset",
         style="cyan",
         justify="center",
@@ -479,6 +503,7 @@ def generate_status(status_data, devices=[], status_message="found"):
             f"({device_data.pos_x}, {device_data.pos_y})",
             f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
             image,
+            format_sandbox_fw(info),
             f"[{reset_cause_color(device_data)}]{format_reset_cause(device_data)}",
         )
     if not odd_ones:
