@@ -1575,17 +1575,28 @@ class Controller:
         their own progress (e.g. the daemon's /flash/stream or
         LocalSwarmitClient.flash) pass False to avoid duplicate output.
 
-        Raises ``StaleBootloaderError`` if any target bot still runs a
-        pre-block bootloader, before a single chunk goes on the wire.
+        Bots on a pre-block bootloader are skipped rather than failing the
+        run: one un-reprovisioned bot in a fleet of a hundred should not cost
+        the other ninety-nine their flash. ``StaleBootloaderError`` is still
+        raised when *every* target is stale, since then there is nothing to
+        transfer and the caller asked for something impossible.
         """
         stale = self.stale_bootloaders(devices)
         if stale:
-            self.logger.error(
-                "ota aborted: stale bootloaders",
+            remaining = [d for d in devices if d not in set(stale)]
+            if not remaining:
+                self.logger.error(
+                    "ota aborted: every target has a stale bootloader",
+                    devices=stale,
+                    required_version=OTA_PROTOCOL_VERSION_BLOCK,
+                )
+                raise StaleBootloaderError(stale)
+            self.logger.warning(
+                "ota skipping stale bootloaders",
                 devices=stale,
                 required_version=OTA_PROTOCOL_VERSION_BLOCK,
             )
-            raise StaleBootloaderError(stale)
+            devices = remaining
         data_size = len(firmware)
         use_progress_bar = show_progress and not self.settings.verbose
         progress = None
