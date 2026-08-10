@@ -476,10 +476,14 @@ def _status_table(rows, show_fw: bool = True) -> Table:
     )
     table.add_column("Image", style="cyan", justify="center")
     if show_fw:
-        table.add_column("Sandbox fw (bl / net)", style="cyan", justify="center")
+        table.add_column(
+            "Sandbox fw (bl / net)", style="cyan", justify="center"
+        )
     table.add_column("Last reset", style="cyan", justify="center")
     for row in rows:
-        table.add_row(*(row if show_fw else row[:FW_CELL] + row[FW_CELL + 1 :]))
+        table.add_row(
+            *(row if show_fw else row[:FW_CELL] + row[FW_CELL + 1 :])
+        )
     return table
 
 
