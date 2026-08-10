@@ -729,14 +729,12 @@ class PayloadDeviceInfo(Payload):
     lh2_homography_count: int = 0
     lh2_flags: int = 0
 
-    def from_bytes(self, bytes_):
-        # A device speaking a newer schema appends fields; parse the prefix we
-        # know and ignore the rest rather than refusing the whole reply. A
-        # short payload is zero-filled for the same reason the status frame
-        # is: it means "older firmware", not "corrupt".
-        if len(bytes_) < self.size:
-            bytes_ = bytes(bytes_) + bytes(self.size - len(bytes_))
-        return super().from_bytes(bytes_[: self.size])
+    # No from_bytes override, for the same reason PayloadStatus has none: a
+    # reply that is not this shape comes from a bot too old to talk to, and
+    # zero-filling it invented a record rather than reporting nothing. It now
+    # raises, the adapter drops the frame, and the cached info simply does not
+    # update. Trailing bytes from a newer schema need no handling either - the
+    # base parser consumes the fields it knows and ignores the rest.
 
 
 @dataclass

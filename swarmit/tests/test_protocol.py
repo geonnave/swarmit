@@ -130,14 +130,21 @@ def test_payload_device_info_round_trip():
     assert parsed.lh2_flags == 0b11
 
 
-def test_payload_device_info_short_payload_does_not_raise():
-    # A bot running older firmware, or a truncated frame, parses as zeros
-    # rather than taking down the RX thread.
-    parsed = PayloadDeviceInfo().from_bytes(b"\x01\x05")
+def test_payload_device_info_short_payload_raises():
+    # A reply that is not the full record comes from a bot too old to talk to.
+    # Zero-filling it invented a device record; raising lets the adapter drop
+    # the frame and leaves the cached info untouched.
+    with pytest.raises(ValueError):
+        PayloadDeviceInfo().from_bytes(b"\x01\x05")
+
+
+def test_payload_device_info_tolerates_trailing_bytes():
+    # A device on a newer schema appends fields. The known prefix still parses
+    # and the rest is ignored, so the host does not need its own truncation.
+    full = bytes(PayloadDeviceInfo(info_version=1, info_gen=42).to_bytes())
+    parsed = PayloadDeviceInfo().from_bytes(full + b"\xde\xad\xbe\xef")
     assert parsed.info_version == 1
-    assert parsed.info_gen == 5
-    assert parsed.image_size == 0
-    assert decode_string_field(parsed.image_name) == ""
+    assert parsed.info_gen == 42
 
 
 def test_string_fields_are_nul_padded_and_truncated():
