@@ -94,6 +94,10 @@ class FaultType(Enum):
     NoFault = 0
     HardFault = 1
     SecureFault = 2
+    # No fault was raised: WDT0 timed out because the application stopped
+    # reloading it. pc/lr name where it was stuck; cfsr/sfsr are structurally
+    # zero, so the inspect view skips them for this one.
+    WatchdogTimeout = 3
 
 
 # nRF5340 application core RESETREAS flags (bit position -> short label).

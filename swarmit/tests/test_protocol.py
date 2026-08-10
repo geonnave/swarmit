@@ -11,6 +11,7 @@ from swarmit.testbed.protocol import (
     PayloadRequestMessage,
     PayloadStatus,
     PayloadType,
+    FaultType,
     boot_reason,
     decode_cfsr,
     decode_reset_reason,
@@ -244,6 +245,10 @@ def test_image_digest_length_matches_firmware():
         (1 << 4, 0, "Unspecified"),
         # A latched fault wins over everything.
         (1 << 3, 1, "HardwareWatchdogReset"),
+        # A watchdog timeout latches fault=3 without any fault being raised.
+        # It is a genuine watchdog reset, so the Matter value is unchanged -
+        # the distinction lives in format_reset_cause, not here.
+        (1 << 1, 3, "HardwareWatchdogReset"),
     ],
 )
 def test_boot_reason_mapping(reset_reason, fault, expected):
@@ -254,3 +259,31 @@ def test_boot_reason_is_derived_not_transmitted():
     # The device does not send it: everything the mapping needs already rides
     # the status frame, so a fix is a host change rather than a reflash.
     assert not hasattr(PayloadDeviceInfo(), "boot_reason")
+
+
+def test_watchdog_timeout_rides_the_existing_crash_report():
+    """A hang costs no wire bytes: it reuses fault, pc and lr.
+
+    The whole point of spending a fault enumerator rather than new fields is
+    that the frame length does not move, so a fleet mid-rollout keeps parsing.
+    """
+    payload = PayloadStatus(
+        device=1,
+        status=2,
+        reset_reason=0x2,  # watchdog0
+        fault=FaultType.WatchdogTimeout.value,
+        from_ns=1,
+        pc=0x0001_3A4E,
+        lr=0x0001_39C0,
+    )
+    raw = payload.to_bytes()
+    assert len(raw) == STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE + INFO_GEN_SIZE
+
+    parsed = PayloadStatus().from_bytes(bytes(raw))
+    assert parsed.fault == 3
+    assert parsed.from_ns == 1
+    assert parsed.pc == 0x0001_3A4E
+    assert parsed.lr == 0x0001_39C0
+    # No fault was raised, so the fault-status registers stay empty.
+    assert parsed.cfsr == 0
+    assert parsed.sfsr == 0
