@@ -2,11 +2,10 @@ import pytest
 
 from swarmit.testbed.protocol import (
     CRASH_REPORT_SIZE,
-    CRASH_REPORT_V1_SIZE,
     IMAGE_DIGEST_LEN,
     INFO_GEN_SIZE,
     INFO_STRING_LEN,
-    STATUS_LEGACY_SIZE,
+    STATUS_BASE_SIZE,
     PayloadDeviceInfo,
     PayloadOTAStart,
     PayloadRequestMessage,
@@ -40,7 +39,7 @@ def test_payload_status_round_trip():
         info_gen=7,
     )
     raw = payload.to_bytes()
-    assert len(raw) == STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE + INFO_GEN_SIZE
+    assert len(raw) == STATUS_BASE_SIZE + CRASH_REPORT_SIZE + INFO_GEN_SIZE
 
     parsed = PayloadStatus().from_bytes(bytes(raw))
     assert parsed.info_gen == 7
@@ -57,24 +56,6 @@ def test_payload_status_round_trip():
     assert parsed.pc == 0x0001_2345
     assert parsed.lr == 0x0001_2340
 
-
-def test_payload_status_legacy_frame():
-    # Status payload from firmware without crash-report support: 12 bytes,
-    # crash report fields parse as zero.
-    legacy = PayloadStatus(
-        device=1, status=1, battery=2900, pos_x=42, pos_y=43
-    ).to_bytes()[:STATUS_LEGACY_SIZE]
-
-    parsed = PayloadStatus().from_bytes(bytes(legacy))
-    assert parsed.device == 1
-    assert parsed.status == 1
-    assert parsed.battery == 2900
-    assert parsed.pos_x == 42
-    assert parsed.pos_y == 43
-    assert parsed.reset_reason == 0
-    assert parsed.fault == 0
-    assert parsed.from_ns == 0
-    assert parsed.pc == 0
 
 
 def test_payload_status_truncated_frame_raises():
@@ -112,18 +93,6 @@ def test_decode_sfsr():
     assert decode_sfsr(1 << 3) == "AUVIOL"
     assert decode_sfsr(1 << 0) == "INVEP"
 
-
-def test_payload_status_pre_generation_frame():
-    # Firmware with a crash report but no generation counter: the frame is one
-    # byte short and must still parse, reporting generation 0. That firmware
-    # predates sp/psr, so its report is the v1 size - a frame carrying the
-    # current 30-byte report and no generation counter never shipped.
-    frame = PayloadStatus(device=1, status=1, battery=2900).to_bytes()[
-        : STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE
-    ]
-    parsed = PayloadStatus().from_bytes(bytes(frame))
-    assert parsed.battery == 2900
-    assert parsed.info_gen == 0
 
 
 def test_device_info_matches_firmware_wire_size():
@@ -266,10 +235,11 @@ def test_boot_reason_is_derived_not_transmitted():
 
 
 def test_watchdog_timeout_rides_the_existing_crash_report():
-    """A hang costs no wire bytes: it reuses fault, pc and lr.
+    """A hang reuses fault, pc and lr rather than adding fields of its own.
 
-    The whole point of spending a fault enumerator rather than new fields is
-    that the frame length does not move, so a fleet mid-rollout keeps parsing.
+    Spending a fault enumerator keeps the two cases - crashed and hung - in
+    one shape, so everything that reads a crash report reads both without
+    branching on which kind it is.
     """
     payload = PayloadStatus(
         device=1,
@@ -281,7 +251,7 @@ def test_watchdog_timeout_rides_the_existing_crash_report():
         lr=0x0001_39C0,
     )
     raw = payload.to_bytes()
-    assert len(raw) == STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE + INFO_GEN_SIZE
+    assert len(raw) == STATUS_BASE_SIZE + CRASH_REPORT_SIZE + INFO_GEN_SIZE
 
     parsed = PayloadStatus().from_bytes(bytes(raw))
     assert parsed.fault == 3
@@ -293,58 +263,6 @@ def test_watchdog_timeout_rides_the_existing_crash_report():
     assert parsed.sfsr == 0
 
 
-def test_payload_status_v1_crash_report_splices_sp_psr():
-    """Firmware predating sp/psr sends a 35-byte frame; info_gen must survive.
-
-    The two new words were appended to the crash report, which puts them ahead
-    of the trailing generation counter rather than at the end of the frame. A
-    zero-filled tail would land them on info_gen and shift it out of position,
-    so this is the one upgrade step that has to splice.
-    """
-    v1 = PayloadStatus(
-        device=1,
-        status=2,
-        battery=2800,
-        reset_reason=0x2,
-        fault=FaultType.WatchdogTimeout.value,
-        from_ns=1,
-        pc=0x0001_3A4E,
-        lr=0x0001_39C0,
-        info_gen=7,
-    )
-    # Build the old wire shape by dropping the two words this release added.
-    full = bytes(v1.to_bytes())
-    old = (
-        full[: STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE]
-        + full[-INFO_GEN_SIZE:]
-    )
-    assert len(old) == STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE + INFO_GEN_SIZE
-
-    parsed = PayloadStatus().from_bytes(old)
-    # Everything before the splice point is untouched...
-    assert parsed.battery == 2800
-    assert parsed.fault == 3
-    assert parsed.pc == 0x0001_3A4E
-    assert parsed.lr == 0x0001_39C0
-    # ...the new fields read as absent...
-    assert parsed.sp == 0
-    assert parsed.psr == 0
-    # ...and info_gen is still the generation counter, not a byte of sp.
-    assert parsed.info_gen == 7
-
-
-def test_payload_status_legacy_frames_still_reach_the_current_shape():
-    """The 12- and 34-byte frames climb the whole ladder, not just one rung."""
-    for size in (
-        STATUS_LEGACY_SIZE,
-        STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE,
-    ):
-        parsed = PayloadStatus().from_bytes(bytes(size))
-        assert parsed.fault == 0
-        assert parsed.pc == 0
-        assert parsed.sp == 0
-        assert parsed.psr == 0
-        assert parsed.info_gen == 0
 
 
 @pytest.mark.parametrize(

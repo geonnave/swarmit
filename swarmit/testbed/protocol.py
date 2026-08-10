@@ -217,15 +217,11 @@ def decode_ipsr(psr: int) -> str:
     return f"exception {number}"
 
 
-# Size of the status payload sent by firmware without crash-report support.
-STATUS_LEGACY_SIZE = 12
+# The fixed head of the status payload: device, status, battery, position.
+STATUS_BASE_SIZE = 12
 # Size of the crash report appended to status payloads (mirrors
 # ipc_crash_report_t in the swarmit firmware).
 CRASH_REPORT_SIZE = 30
-# The first crash report, before sp/psr were added. Firmware in the field still
-# sends this, and the two extra words land *inside* the report rather than at
-# the end of the frame, so upgrading it is a splice and not a zero-filled tail.
-CRASH_REPORT_V1_SIZE = 22
 # Size of the generation counter appended after the crash report.
 INFO_GEN_SIZE = 1
 
@@ -387,27 +383,11 @@ class PayloadStatus(Payload):
     # steady state costs no device-info traffic at all.
     info_gen: int = 0
 
-    def from_bytes(self, bytes_):
-        # Each block was appended to this frame in a different release, so a
-        # short payload means "that firmware predates this field", not a
-        # corrupt frame. Upgrade oldest-first so a mixed fleet keeps reporting
-        # status through a rollout.
-        raw = bytes(bytes_)
-        if len(raw) == STATUS_LEGACY_SIZE:
-            raw += bytes(CRASH_REPORT_V1_SIZE)
-        if len(raw) == STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE:
-            raw += bytes(INFO_GEN_SIZE)
-        if len(raw) == STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE + INFO_GEN_SIZE:
-            # sp/psr were appended to the crash report, which puts them *ahead*
-            # of the trailing info_gen byte rather than at the end of the frame.
-            # Zero-filling the tail would land them on info_gen and shift it out
-            # of position, so this one is a splice.
-            raw = (
-                raw[:-INFO_GEN_SIZE]
-                + bytes(CRASH_REPORT_SIZE - CRASH_REPORT_V1_SIZE)
-                + raw[-INFO_GEN_SIZE:]
-            )
-        return super().from_bytes(raw)
+    # There is deliberately no upgrade path for a shorter frame. Firmware and
+    # host ship together, so a payload of any other shape comes from a bot too
+    # old to talk to: the adapter drops the frame and the bot never appears,
+    # which is the wanted outcome. Reflashing is the fix, and `swarm flash`
+    # already refuses those bots by bootloader version.
 
 
 @dataclass
