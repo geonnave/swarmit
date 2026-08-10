@@ -1098,7 +1098,9 @@ def test_a_hang_is_not_reported_as_a_crash():
         fault=FaultType.HardFault.value,
         pc=0x0001_3A4E,
     )
-    assert format_reset_cause(crashed).startswith("crashed (watchdog0 HardFault")
+    assert format_reset_cause(crashed).startswith(
+        "crashed (watchdog0 HardFault"
+    )
 
     # Firmware predating the capture, and the case where the handler could not
     # run: WDT0 fired with nothing latched. Still a crash, still no address.

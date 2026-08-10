@@ -6,12 +6,12 @@ from swarmit.testbed.protocol import (
     INFO_GEN_SIZE,
     INFO_STRING_LEN,
     STATUS_BASE_SIZE,
+    FaultType,
     PayloadDeviceInfo,
     PayloadOTAStart,
     PayloadRequestMessage,
     PayloadStatus,
     PayloadType,
-    FaultType,
     boot_reason,
     decode_cfsr,
     decode_ipsr,
@@ -57,7 +57,6 @@ def test_payload_status_round_trip():
     assert parsed.lr == 0x0001_2340
 
 
-
 def test_payload_status_truncated_frame_raises():
     with pytest.raises(ValueError):
         PayloadStatus().from_bytes(bytes(5))
@@ -92,7 +91,6 @@ def test_decode_sfsr():
     # NS write into a secure region -> attribution unit violation
     assert decode_sfsr(1 << 3) == "AUVIOL"
     assert decode_sfsr(1 << 0) == "INVEP"
-
 
 
 def test_device_info_matches_firmware_wire_size():
@@ -261,8 +259,6 @@ def test_watchdog_timeout_rides_the_existing_crash_report():
     # No fault was raised, so the fault-status registers stay empty.
     assert parsed.cfsr == 0
     assert parsed.sfsr == 0
-
-
 
 
 @pytest.mark.parametrize(

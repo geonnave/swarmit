@@ -725,9 +725,7 @@ def generate_info(status_data, devices=[], show_raw=False):
             # The IPSR decode is the point of carrying psr: it says whether the
             # bot was in an interrupt handler, which a pc in a shared driver
             # function cannot tell you on its own.
-            table.add_row(
-                "  psr", f"0x{d.psr:08x}  (in {decode_ipsr(d.psr)})"
-            )
+            table.add_row("  psr", f"0x{d.psr:08x}  (in {decode_ipsr(d.psr)})")
 
         # Both raw packets together, because the pair is what makes the two
         # channels legible: the status frame arrives every second and its last
