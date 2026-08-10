@@ -2,6 +2,7 @@ import pytest
 
 from swarmit.testbed.protocol import (
     CRASH_REPORT_SIZE,
+    CRASH_REPORT_V1_SIZE,
     IMAGE_DIGEST_LEN,
     INFO_GEN_SIZE,
     INFO_STRING_LEN,
@@ -14,6 +15,7 @@ from swarmit.testbed.protocol import (
     FaultType,
     boot_reason,
     decode_cfsr,
+    decode_ipsr,
     decode_reset_reason,
     decode_sfsr,
     decode_string_field,
@@ -113,9 +115,11 @@ def test_decode_sfsr():
 
 def test_payload_status_pre_generation_frame():
     # Firmware with a crash report but no generation counter: the frame is one
-    # byte short and must still parse, reporting generation 0.
+    # byte short and must still parse, reporting generation 0. That firmware
+    # predates sp/psr, so its report is the v1 size - a frame carrying the
+    # current 30-byte report and no generation counter never shipped.
     frame = PayloadStatus(device=1, status=1, battery=2900).to_bytes()[
-        : STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE
+        : STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE
     ]
     parsed = PayloadStatus().from_bytes(bytes(frame))
     assert parsed.battery == 2900
@@ -287,3 +291,71 @@ def test_watchdog_timeout_rides_the_existing_crash_report():
     # No fault was raised, so the fault-status registers stay empty.
     assert parsed.cfsr == 0
     assert parsed.sfsr == 0
+
+
+def test_payload_status_v1_crash_report_splices_sp_psr():
+    """Firmware predating sp/psr sends a 35-byte frame; info_gen must survive.
+
+    The two new words were appended to the crash report, which puts them ahead
+    of the trailing generation counter rather than at the end of the frame. A
+    zero-filled tail would land them on info_gen and shift it out of position,
+    so this is the one upgrade step that has to splice.
+    """
+    v1 = PayloadStatus(
+        device=1,
+        status=2,
+        battery=2800,
+        reset_reason=0x2,
+        fault=FaultType.WatchdogTimeout.value,
+        from_ns=1,
+        pc=0x0001_3A4E,
+        lr=0x0001_39C0,
+        info_gen=7,
+    )
+    # Build the old wire shape by dropping the two words this release added.
+    full = bytes(v1.to_bytes())
+    old = (
+        full[: STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE]
+        + full[-INFO_GEN_SIZE:]
+    )
+    assert len(old) == STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE + INFO_GEN_SIZE
+
+    parsed = PayloadStatus().from_bytes(old)
+    # Everything before the splice point is untouched...
+    assert parsed.battery == 2800
+    assert parsed.fault == 3
+    assert parsed.pc == 0x0001_3A4E
+    assert parsed.lr == 0x0001_39C0
+    # ...the new fields read as absent...
+    assert parsed.sp == 0
+    assert parsed.psr == 0
+    # ...and info_gen is still the generation counter, not a byte of sp.
+    assert parsed.info_gen == 7
+
+
+def test_payload_status_legacy_frames_still_reach_the_current_shape():
+    """The 12- and 34-byte frames climb the whole ladder, not just one rung."""
+    for size in (
+        STATUS_LEGACY_SIZE,
+        STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE,
+    ):
+        parsed = PayloadStatus().from_bytes(bytes(size))
+        assert parsed.fault == 0
+        assert parsed.pc == 0
+        assert parsed.sp == 0
+        assert parsed.psr == 0
+        assert parsed.info_gen == 0
+
+
+@pytest.mark.parametrize(
+    "psr,expected",
+    [
+        (0x0100_0000, "thread"),  # T bit set, IPSR 0: ordinary app code
+        (0x0100_0003, "HardFault"),
+        (0x0100_000F, "SysTick"),
+        (0x0100_001A, "IRQ 10"),  # 26 - 16
+        (0x0000_0009, "exception 9"),  # reserved, reported honestly
+    ],
+)
+def test_decode_ipsr(psr, expected):
+    assert decode_ipsr(psr) == expected

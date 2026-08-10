@@ -184,11 +184,48 @@ def decode_sfsr(sfsr: int) -> str:
     return _decode_flags(sfsr, SFSR_FLAGS)
 
 
+# ARMv8-M exception numbers, as they appear in xPSR's IPSR field. Numbers at or
+# above 16 are external interrupts, IRQ = number - 16.
+IPSR_EXCEPTIONS = {
+    0: "thread",
+    2: "NMI",
+    3: "HardFault",
+    4: "MemManage",
+    5: "BusFault",
+    6: "UsageFault",
+    7: "SecureFault",
+    11: "SVCall",
+    12: "DebugMonitor",
+    14: "PendSV",
+    15: "SysTick",
+}
+
+
+def decode_ipsr(psr: int) -> str:
+    """Name the exception the interrupted context was running in.
+
+    IPSR is the low 9 bits of xPSR. `thread` means ordinary application code;
+    anything else means the hang or fault happened inside a handler, which is
+    the one thing this field tells you that the pc alone does not - a pc in a
+    driver function reads the same either way.
+    """
+    number = psr & 0x1FF
+    if number in IPSR_EXCEPTIONS:
+        return IPSR_EXCEPTIONS[number]
+    if number >= 16:
+        return f"IRQ {number - 16}"
+    return f"exception {number}"
+
+
 # Size of the status payload sent by firmware without crash-report support.
 STATUS_LEGACY_SIZE = 12
 # Size of the crash report appended to status payloads (mirrors
 # ipc_crash_report_t in the swarmit firmware).
-CRASH_REPORT_SIZE = 22
+CRASH_REPORT_SIZE = 30
+# The first crash report, before sp/psr were added. Firmware in the field still
+# sends this, and the two extra words land *inside* the report rather than at
+# the end of the frame, so upgrading it is a splice and not a zero-filled tail.
+CRASH_REPORT_V1_SIZE = 22
 # Size of the generation counter appended after the crash report.
 INFO_GEN_SIZE = 1
 
@@ -325,6 +362,8 @@ class PayloadStatus(Payload):
             PayloadFieldMetadata(name="sfsr", disp="sfsr", length=4),
             PayloadFieldMetadata(name="pc", disp="pc", length=4),
             PayloadFieldMetadata(name="lr", disp="lr", length=4),
+            PayloadFieldMetadata(name="sp", disp="sp", length=4),
+            PayloadFieldMetadata(name="psr", disp="psr", length=4),
             PayloadFieldMetadata(name="info_gen", disp="gen"),
         ]
     )
@@ -341,6 +380,8 @@ class PayloadStatus(Payload):
     sfsr: int = 0
     pc: int = 0
     lr: int = 0
+    sp: int = 0
+    psr: int = 0
     # Changes whenever anything in the device-info block changes. The
     # controller refetches on any difference from what it cached, so the
     # steady state costs no device-info traffic at all.
@@ -349,13 +390,24 @@ class PayloadStatus(Payload):
     def from_bytes(self, bytes_):
         # Each block was appended to this frame in a different release, so a
         # short payload means "that firmware predates this field", not a
-        # corrupt frame. Zero-fill the missing tail so a mixed fleet keeps
-        # reporting status through a rollout.
-        if len(bytes_) == STATUS_LEGACY_SIZE:
-            bytes_ = bytes(bytes_) + bytes(CRASH_REPORT_SIZE)
-        if len(bytes_) == STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE:
-            bytes_ = bytes(bytes_) + bytes(INFO_GEN_SIZE)
-        return super().from_bytes(bytes_)
+        # corrupt frame. Upgrade oldest-first so a mixed fleet keeps reporting
+        # status through a rollout.
+        raw = bytes(bytes_)
+        if len(raw) == STATUS_LEGACY_SIZE:
+            raw += bytes(CRASH_REPORT_V1_SIZE)
+        if len(raw) == STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE:
+            raw += bytes(INFO_GEN_SIZE)
+        if len(raw) == STATUS_LEGACY_SIZE + CRASH_REPORT_V1_SIZE + INFO_GEN_SIZE:
+            # sp/psr were appended to the crash report, which puts them *ahead*
+            # of the trailing info_gen byte rather than at the end of the frame.
+            # Zero-filling the tail would land them on info_gen and shift it out
+            # of position, so this one is a splice.
+            raw = (
+                raw[:-INFO_GEN_SIZE]
+                + bytes(CRASH_REPORT_SIZE - CRASH_REPORT_V1_SIZE)
+                + raw[-INFO_GEN_SIZE:]
+            )
+        return super().from_bytes(raw)
 
 
 @dataclass
