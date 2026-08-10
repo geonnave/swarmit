@@ -343,6 +343,19 @@ int main(void) {
         ipc_shared_data.crash_report.sfsr    = crash_latch.sfsr;
         ipc_shared_data.crash_report.pc      = crash_latch.pc;
         ipc_shared_data.crash_report.lr      = crash_latch.lr;
+    } else {
+        // ipc_shared_data lives in .shared_data, which is load="No" and outside
+        // the startup zeroing loops, so these fields otherwise keep the previous
+        // boot's snapshot - or uninitialized RAM on a cold boot, where a random
+        // non-zero fault byte reports a crash on a device that was just switched
+        // on. Without a latch there is nothing to report, and saying so beats
+        // reporting a fault that did not happen.
+        ipc_shared_data.crash_report.fault   = CRASH_FAULT_NONE;
+        ipc_shared_data.crash_report.from_ns = 0;
+        ipc_shared_data.crash_report.cfsr    = 0;
+        ipc_shared_data.crash_report.sfsr    = 0;
+        ipc_shared_data.crash_report.pc      = 0;
+        ipc_shared_data.crash_report.lr      = 0;
     }
     crash_latch.magic = 0;
 
