@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from cryptography.hazmat.primitives import hashes
 from dotbot_utils.protocol import Packet, Payload
 from dotbot_utils.serial_interface import get_default_port
-from rich import print
+from rich import get_console, print
+from rich.columns import Columns
 from rich.console import Group
 from rich.live import Live
 from rich.panel import Panel
@@ -415,6 +416,113 @@ def image_mismatches(status_data) -> tuple[str, list[tuple[str, DeviceInfo]]]:
     return majority, odd
 
 
+def _split_dirty(version: str) -> tuple[str, bool]:
+    """Separate a `git describe --dirty` version from its dirty marker."""
+    if version.endswith("-dirty"):
+        return version[: -len("-dirty")], True
+    return version, False
+
+
+def format_sandbox_fw(info: DeviceInfo | None) -> str:
+    """One column for the bootloader and net-core versions.
+
+    They are built and flashed together, so the two agreeing is the normal
+    case and printing both in full would spend ~50 columns on every row to
+    say the same thing twice. Collapse them when they agree and show both
+    when they do not - a real disagreement means a half-finished flash, which
+    is the reason to have the column at all.
+
+    `-dirty` is build state rather than a different version, so it is compared
+    out and reported as a flag. Otherwise a net core built from an uncommitted
+    tree - the normal case at the bench - would look like a version mismatch
+    and defeat the collapse on every row.
+    """
+    if info is None:
+        return "-"
+    bl, net = info.bl_version, info.net_version
+    if not bl and not net:
+        return "-"
+
+    bl_base, bl_dirty = _split_dirty(bl)
+    net_base, net_dirty = _split_dirty(net)
+    if bl_base != net_base:
+        return f"[yellow]{bl or '?'} / {net or '?'}"
+
+    version = bl_base or net_base
+    if bl_dirty and net_dirty:
+        return f"{version} [yellow](dirty)"
+    if bl_dirty:
+        return f"{version} [yellow](bl dirty)"
+    if net_dirty:
+        return f"{version} [yellow](net dirty)"
+    return version
+
+
+FW_CELL = 6  # index of the sandbox-fw cell in a status row
+
+
+def _status_table(rows, show_fw: bool = True) -> Table:
+    """One status table over `rows`, each a tuple of preformatted cells."""
+    table = Table()
+    table.add_column("Device Addr", style="magenta", no_wrap=True)
+    table.add_column("Type", style="cyan", justify="center")
+    table.add_column("Battery", style="cyan", justify="center")
+    table.add_column("Position", style="cyan", justify="center")
+    table.add_column(
+        "Status",
+        style="green",
+        justify="center",
+        width=max([len(m) for m in StatusType.__members__]),
+    )
+    table.add_column("Image", style="cyan", justify="center")
+    if show_fw:
+        table.add_column(
+            "Sandbox fw (bl / net)", style="cyan", justify="center"
+        )
+    table.add_column("Last reset", style="cyan", justify="center")
+    for row in rows:
+        table.add_row(
+            *(row if show_fw else row[:FW_CELL] + row[FW_CELL + 1 :])
+        )
+    return table
+
+
+def _status_columns(rows, show_fw: bool = True, console=None):
+    """Lay the rows out in newspaper columns when one table would not fit.
+
+    A hundred-bot fleet is one row per bot and far taller than any terminal,
+    while the table itself uses maybe half the width - so the run scrolls off
+    the top with the right-hand side of the screen empty. Split the rows
+    across side-by-side tables instead, as many as fit the width and only as
+    many as the height actually needs.
+
+    Below that threshold nothing changes: one table, exactly as before.
+    """
+    console = console or get_console()
+    single = _status_table(rows, show_fw=show_fw)
+    if not rows:
+        return single
+
+    table_width = console.measure(single).maximum
+    gap = 2
+    fit_across = (console.width + gap) // (table_width + gap)
+    # Header, borders and the surrounding blank lines cost about this much.
+    body_height = max(1, console.size.height - 8)
+    needed = -(-len(rows) // body_height)  # ceil
+
+    n = max(1, min(fit_across, needed, len(rows)))
+    if n <= 1:
+        return single
+
+    per = -(-len(rows) // n)  # ceil, so the last column is the short one
+    chunks = [rows[i : i + per] for i in range(0, len(rows), per)]
+    return Columns(
+        [_status_table(chunk, show_fw=show_fw) for chunk in chunks],
+        padding=(0, 1),
+        expand=False,
+    )
+
+
 def generate_status(status_data, devices=[], status_message="found"):
     data = {
         addr: device_data
@@ -428,41 +536,9 @@ def generate_status(status_data, devices=[], status_message="found"):
         f"\n{len(data)} device{'s' if len(data) > 1 else ''} {status_message}\n"
     )
 
-    table = Table()
-    table.add_column("Device Addr", style="magenta", no_wrap=True)
-    table.add_column(
-        "Type",
-        style="cyan",
-        justify="center",
-    )
-    table.add_column(
-        "Battery",
-        style="cyan",
-        justify="center",
-    )
-    table.add_column(
-        "Position",
-        style="cyan",
-        justify="center",
-    )
-    table.add_column(
-        "Status",
-        style="green",
-        justify="center",
-        width=max([len(m) for m in StatusType.__members__]),
-    )
-    table.add_column(
-        "Image",
-        style="cyan",
-        justify="center",
-    )
-    table.add_column(
-        "Last reset",
-        style="cyan",
-        justify="center",
-    )
     majority, odd_ones = image_mismatches(data)
     odd_addrs = {addr for addr, _ in odd_ones}
+    rows = []
     for device_addr, device_data in sorted(data.items()):
         info = device_data.info
         # "-" means the bot has not answered yet, which is what an older
@@ -472,15 +548,34 @@ def generate_status(status_data, devices=[], status_message="found"):
         if device_addr in odd_addrs:
             image = f"[yellow]{image}"
 
-        table.add_row(
-            f"{device_addr}",
-            f"{device_data.device.name}",
-            f"[{battery_level_color(device_data.battery)}]{device_data.battery / 1000:.2f}V ({int(device_data.battery / 3000 * 100)}%)",
-            f"({device_data.pos_x}, {device_data.pos_y})",
-            f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
-            image,
-            f"[{reset_cause_color(device_data)}]{format_reset_cause(device_data)}",
+        rows.append(
+            (
+                f"{device_addr}",
+                f"{device_data.device.name}",
+                f"[{battery_level_color(device_data.battery)}]{device_data.battery / 1000:.2f}V ({int(device_data.battery / 3000 * 100)}%)",
+                f"({device_data.pos_x}, {device_data.pos_y})",
+                f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
+                image,
+                format_sandbox_fw(info),
+                f"[{reset_cause_color(device_data)}]{format_reset_cause(device_data)}",
+            )
         )
+
+    # A fleet is normally flashed in one go, so the sandbox version is the same
+    # string on every row - 34 columns spent to say one thing N times, and the
+    # width that decides whether the table can be laid out side by side. State
+    # it once above the table instead, and keep the column only when the fleet
+    # actually disagrees, which is the case worth a column.
+    fw_values = {row[FW_CELL] for row in rows}
+    show_fw = len(fw_values) > 1
+    if not show_fw:
+        only = next(iter(fw_values))
+        if only != "-":
+            header = Text.assemble(
+                header, Text.from_markup(f"Sandbox fw (bl / net): {only}\n")
+            )
+
+    table = _status_columns(rows, show_fw=show_fw)
     if not odd_ones:
         return Group(header, table)
 
@@ -1484,17 +1579,28 @@ class Controller:
         their own progress (e.g. the daemon's /flash/stream or
         LocalSwarmitClient.flash) pass False to avoid duplicate output.
 
-        Raises ``StaleBootloaderError`` if any target bot still runs a
-        pre-block bootloader, before a single chunk goes on the wire.
+        Bots on a pre-block bootloader are skipped rather than failing the
+        run: one un-reprovisioned bot in a fleet of a hundred should not cost
+        the other ninety-nine their flash. ``StaleBootloaderError`` is still
+        raised when *every* target is stale, since then there is nothing to
+        transfer and the caller asked for something impossible.
         """
         stale = self.stale_bootloaders(devices)
         if stale:
-            self.logger.error(
-                "ota aborted: stale bootloaders",
+            remaining = [d for d in devices if d not in set(stale)]
+            if not remaining:
+                self.logger.error(
+                    "ota aborted: every target has a stale bootloader",
+                    devices=stale,
+                    required_version=OTA_PROTOCOL_VERSION_BLOCK,
+                )
+                raise StaleBootloaderError(stale)
+            self.logger.warning(
+                "ota skipping stale bootloaders",
                 devices=stale,
                 required_version=OTA_PROTOCOL_VERSION_BLOCK,
             )
-            raise StaleBootloaderError(stale)
+            devices = remaining
         data_size = len(firmware)
         use_progress_bar = show_progress and not self.settings.verbose
         progress = None

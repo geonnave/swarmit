@@ -592,6 +592,12 @@ def flash(
                             )
                         )
                     return
+                elif etype == "warning":
+                    # Printed rather than raised: the flash continues without
+                    # the devices named here, and the operator has to see which.
+                    console.print(
+                        f"[bold yellow]Warning:[/] {ev.get('message', '')}"
+                    )
                 elif etype == "error":
                     if progress is not None:
                         progress.close()

@@ -100,23 +100,45 @@ class LocalSwarmitClient:
 
         if start_data["missed"]:
             missed = sorted(set(start_data["missed"]))
+            if not start_data["acked"]:
+                yield {
+                    "type": "error",
+                    "message": f"{len(missed)} OTA start acks missed: {missed}",
+                }
+                return
+            # A bot that never answers the start - out of range, wedged, or on
+            # a bootloader that does not know this message - should cost itself
+            # the flash, not the rest of the fleet.
             yield {
-                "type": "error",
-                "message": f"{len(missed)} OTA start acks missed: {missed}",
+                "type": "warning",
+                "message": (
+                    f"skipping {len(missed)} device(s) that missed the OTA "
+                    f"start ack: {missed}"
+                ),
             }
-            return
 
         stale = self._controller.stale_bootloaders(start_data["acked"])
         if stale:
+            remaining = [d for d in start_data["acked"] if d not in set(stale)]
+            if not remaining:
+                yield {
+                    "type": "error",
+                    "message": (
+                        f"every target ({len(stale)}) runs a bootloader older "
+                        f"than the block OTA protocol: {stale}. Re-provision "
+                        "them with 'dotbot device flash-swarmit-sandbox'."
+                    ),
+                }
+                return
             yield {
-                "type": "error",
+                "type": "warning",
                 "message": (
-                    f"{len(stale)} device(s) run a bootloader older than the "
-                    f"block OTA protocol: {stale}. Re-provision them with "
-                    "'dotbot device flash-swarmit-sandbox'."
+                    f"skipping {len(stale)} device(s) on a bootloader older "
+                    f"than the block OTA protocol: {stale}. Re-provision them "
+                    "with 'dotbot device flash-swarmit-sandbox'."
                 ),
             }
-            return
+            start_data["acked"] = remaining
 
         block_size = self._controller.ota_block_size
         total_chunks = len(self._controller.chunks)

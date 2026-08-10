@@ -238,17 +238,64 @@ def test_local_context_manager_terminates(controller_mock):
     inst.terminate.assert_called_once()
 
 
-@patch("swarmit.client.local.Controller")
-def test_local_flash_emits_error_on_missed_acks(controller_mock):
+def _flash_controller(controller_mock, acked, missed=(), stale=()):
+    """Wire a mocked Controller for a flash that reaches the transfer."""
     inst = controller_mock.return_value
     inst.start_ota.return_value = {
         "ota": MagicMock(fw_hash=b"\x00" * 32),
-        "acked": ["A"],
-        "missed": ["B"],
+        "acked": list(acked),
+        "missed": list(missed),
     }
+    # Set even when empty: an unconfigured MagicMock is truthy but iterates
+    # empty, which fakes a "skipping 0 device(s)" stale-bootloader warning.
+    inst.stale_bootloaders.return_value = list(stale)
     inst.chunks = [MagicMock()]
+    return inst
+
+
+@patch("swarmit.client.local.Controller")
+def test_local_flash_errors_when_no_device_acked_the_start(controller_mock):
+    _flash_controller(controller_mock, acked=[], missed=["B"])
     client = LocalSwarmitClient(ControllerSettings())
     events = list(client.flash(b"fw"))
     assert len(events) == 1
     assert events[0]["type"] == "error"
     assert "missed" in events[0]["message"]
+
+
+@patch("swarmit.client.local.Controller")
+def test_local_flash_skips_devices_that_missed_the_start_ack(controller_mock):
+    _flash_controller(controller_mock, acked=["A"], missed=["B"])
+    client = LocalSwarmitClient(ControllerSettings())
+    events = list(client.flash(b"fw"))
+    assert events[0]["type"] == "warning"
+    assert "B" in events[0]["message"]
+    assert not [e for e in events if e["type"] == "error"]
+    started = [e for e in events if e["type"] == "flash_started"]
+    assert len(started) == 1
+    assert started[0]["devices"] == ["A"]
+
+
+@patch("swarmit.client.local.Controller")
+def test_local_flash_errors_when_every_bootloader_is_stale(controller_mock):
+    _flash_controller(controller_mock, acked=["A"], stale=["A"])
+    client = LocalSwarmitClient(ControllerSettings())
+    events = list(client.flash(b"fw"))
+    assert len(events) == 1
+    assert events[0]["type"] == "error"
+    assert "bootloader older" in events[0]["message"]
+
+
+@patch("swarmit.client.local.Controller")
+def test_local_flash_skips_stale_bootloaders_and_flashes_the_rest(
+    controller_mock,
+):
+    _flash_controller(controller_mock, acked=["A", "B"], stale=["B"])
+    client = LocalSwarmitClient(ControllerSettings())
+    events = list(client.flash(b"fw"))
+    assert events[0]["type"] == "warning"
+    assert "B" in events[0]["message"]
+    assert not [e for e in events if e["type"] == "error"]
+    started = [e for e in events if e["type"] == "flash_started"]
+    assert len(started) == 1
+    assert started[0]["devices"] == ["A"]

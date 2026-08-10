@@ -373,30 +373,58 @@ async def flash_stream(payload: FlashRequest, request: Request):
             return
 
         if start_data["missed"]:
+            missed = sorted(set(start_data["missed"]))
+            if not start_data["acked"]:
+                yield _sse(
+                    {
+                        "type": "error",
+                        "message": (
+                            f"{len(missed)} OTA start acks missed: {missed}"
+                        ),
+                    }
+                )
+                return
+            # A bot that never answers the start - out of range, wedged, or on
+            # a bootloader that does not know this message - should cost itself
+            # the flash, not the rest of the fleet.
             yield _sse(
                 {
-                    "type": "error",
+                    "type": "warning",
                     "message": (
-                        f"{len(start_data['missed'])} OTA start acks "
-                        f"missed: {sorted(set(start_data['missed']))}"
+                        f"skipping {len(missed)} device(s) that missed the "
+                        f"OTA start ack: {missed}"
                     ),
                 }
             )
-            return
 
         stale = controller.stale_bootloaders(start_data["acked"])
         if stale:
+            remaining = [d for d in start_data["acked"] if d not in set(stale)]
+            if not remaining:
+                yield _sse(
+                    {
+                        "type": "error",
+                        "message": (
+                            f"every target ({len(stale)}) runs a bootloader "
+                            f"older than the block OTA protocol: {stale}. "
+                            "Re-provision them with 'dotbot device "
+                            "flash-swarmit-sandbox'."
+                        ),
+                    }
+                )
+                return
             yield _sse(
                 {
-                    "type": "error",
+                    "type": "warning",
                     "message": (
-                        f"{len(stale)} device(s) run a bootloader older than "
-                        f"the block OTA protocol: {stale}. Re-provision them "
-                        "with 'dotbot device flash-swarmit-sandbox'."
+                        f"skipping {len(stale)} device(s) on a bootloader "
+                        f"older than the block OTA protocol: {stale}. "
+                        "Re-provision them with 'dotbot device "
+                        "flash-swarmit-sandbox'."
                     ),
                 }
             )
-            return
+            start_data["acked"] = remaining
 
         block_size = controller.ota_block_size
         total_chunks = len(controller.chunks)
