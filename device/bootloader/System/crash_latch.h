@@ -34,6 +34,8 @@ typedef struct {
     uint32_t sfsr;     ///< Secure Fault Status Register
     uint32_t pc;       ///< Stacked program counter at fault (0 if unavailable)
     uint32_t lr;       ///< Stacked link register at fault (0 if unavailable)
+    uint32_t sp;       ///< Stack pointer of the interrupted context, i.e. the address of its exception frame
+    uint32_t psr;      ///< Stacked xPSR; its IPSR field names the exception that was active, 0 for thread mode
 } crash_latch_t;
 
 extern volatile crash_latch_t crash_latch;

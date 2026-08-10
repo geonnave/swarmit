@@ -343,6 +343,8 @@ int main(void) {
         ipc_shared_data.crash_report.sfsr    = crash_latch.sfsr;
         ipc_shared_data.crash_report.pc      = crash_latch.pc;
         ipc_shared_data.crash_report.lr      = crash_latch.lr;
+        ipc_shared_data.crash_report.sp      = crash_latch.sp;
+        ipc_shared_data.crash_report.psr     = crash_latch.psr;
     } else {
         // ipc_shared_data lives in .shared_data, which is load="No" and outside
         // the startup zeroing loops, so these fields otherwise keep the previous
@@ -356,6 +358,8 @@ int main(void) {
         ipc_shared_data.crash_report.sfsr    = 0;
         ipc_shared_data.crash_report.pc      = 0;
         ipc_shared_data.crash_report.lr      = 0;
+        ipc_shared_data.crash_report.sp      = 0;
+        ipc_shared_data.crash_report.psr     = 0;
     }
     crash_latch.magic = 0;
 

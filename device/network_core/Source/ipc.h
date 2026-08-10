@@ -119,6 +119,8 @@ typedef struct __attribute__((packed)) {
     uint32_t sfsr;          ///< Secure Fault Status Register at fault
     uint32_t pc;            ///< Stacked program counter at fault
     uint32_t lr;            ///< Stacked link register at fault
+    uint32_t sp;            ///< Stack pointer of the interrupted context (its exception frame address)
+    uint32_t psr;           ///< Stacked xPSR; IPSR field names the active exception, 0 for thread mode
 } ipc_crash_report_t;
 
 typedef struct __attribute__((packed)) {
