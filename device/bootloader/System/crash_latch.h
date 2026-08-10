@@ -20,9 +20,10 @@
 #define CRASH_LATCH_MAGIC (0xFA170BADUL)
 
 typedef enum {
-    CRASH_FAULT_NONE   = 0,  ///< No fault caught - clean reset (power-on, pin, stop, soft-reset)
-    CRASH_FAULT_HARD   = 1,  ///< Secure HardFault, e.g. a bus/usage fault escalated in secure or NSC code
-    CRASH_FAULT_SECURE = 2,  ///< SecureFault, e.g. the app writing into secure memory (a NULL store hits AUVIOL)
+    CRASH_FAULT_NONE     = 0,  ///< No fault caught - clean reset (power-on, pin, stop, soft-reset)
+    CRASH_FAULT_HARD     = 1,  ///< Secure HardFault, e.g. a bus/usage fault escalated in secure or NSC code
+    CRASH_FAULT_SECURE   = 2,  ///< SecureFault, e.g. the app writing into secure memory (a NULL store hits AUVIOL)
+    CRASH_FAULT_WATCHDOG = 3,  ///< WDT0 timed out - no fault was raised, the app stopped reloading it
 } crash_fault_t;
 
 typedef struct {
@@ -33,6 +34,8 @@ typedef struct {
     uint32_t sfsr;     ///< Secure Fault Status Register
     uint32_t pc;       ///< Stacked program counter at fault (0 if unavailable)
     uint32_t lr;       ///< Stacked link register at fault (0 if unavailable)
+    uint32_t sp;       ///< Stack pointer of the interrupted context, i.e. the address of its exception frame
+    uint32_t psr;      ///< Stacked xPSR; its IPSR field names the exception that was active, 0 for thread mode
 } crash_latch_t;
 
 extern volatile crash_latch_t crash_latch;
@@ -48,5 +51,22 @@ extern volatile crash_latch_t crash_latch;
  *                          whether the faulting context was secure
  */
 void crash_latch_fault(uint32_t fault, uint32_t *sp, uint32_t exc_return);
+
+/**
+ * @brief Snapshot the interrupted context when WDT0 times out
+ *
+ * Enabling WDT0's TIMEOUT interrupt postpones the watchdog reset by two
+ * 32.768 kHz cycles (~61 us), which is the whole window this has to record
+ * where the application was stuck. The reset is not cancellable, so this only
+ * ever adds a diagnostic.
+ *
+ * Leaves an already-valid latch alone: a fault handler that latched is spinning
+ * on purpose, waiting for exactly this timeout, and its snapshot is the
+ * interesting one.
+ *
+ * @param[in]   sp          Stack frame of the interrupted context
+ * @param[in]   exc_return  EXC_RETURN seen on handler entry
+ */
+void crash_latch_watchdog(uint32_t *sp, uint32_t exc_return);
 
 #endif  // __CRASH_LATCH_H

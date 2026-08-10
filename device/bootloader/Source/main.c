@@ -115,6 +115,22 @@ static void setup_watchdog0(void) {
 
     // Configure timeout and callback
     NRF_WDT0_S->CRV = 32768 - 1;
+
+    // Take the TIMEOUT interrupt: it is what postpones the reset by two
+    // 32.768 kHz cycles, and that window is the only chance to record where the
+    // application was when its deadline blew. The reset still lands, so this
+    // only ever adds a diagnostic. Priority 0 matches SecureFault's default, so
+    // a fault handler already spinning for this timeout is never preempted and
+    // its richer snapshot survives. WDT0 stays secure - no NVIC_SetTargetState -
+    // so non-secure code can reach neither the peripheral nor its interrupt.
+    // Configured before TASKS_START: CRV, RREN and CONFIG are blocked for
+    // reconfiguration once the watchdog runs.
+    NRF_WDT0_S->EVENTS_TIMEOUT = 0;
+    NRF_WDT0_S->INTENSET = WDT_INTENSET_TIMEOUT_Enabled << WDT_INTENSET_TIMEOUT_Pos;
+    NVIC_SetPriority(WDT0_IRQn, 0);
+    NVIC_ClearPendingIRQ(WDT0_IRQn);
+    NVIC_EnableIRQ(WDT0_IRQn);
+
     NRF_WDT0_S->TASKS_START = WDT_TASKS_START_TASKS_START_Trigger << WDT_TASKS_START_TASKS_START_Pos;
 }
 
@@ -327,6 +343,23 @@ int main(void) {
         ipc_shared_data.crash_report.sfsr    = crash_latch.sfsr;
         ipc_shared_data.crash_report.pc      = crash_latch.pc;
         ipc_shared_data.crash_report.lr      = crash_latch.lr;
+        ipc_shared_data.crash_report.sp      = crash_latch.sp;
+        ipc_shared_data.crash_report.psr     = crash_latch.psr;
+    } else {
+        // ipc_shared_data lives in .shared_data, which is load="No" and outside
+        // the startup zeroing loops, so these fields otherwise keep the previous
+        // boot's snapshot - or uninitialized RAM on a cold boot, where a random
+        // non-zero fault byte reports a crash on a device that was just switched
+        // on. Without a latch there is nothing to report, and saying so beats
+        // reporting a fault that did not happen.
+        ipc_shared_data.crash_report.fault   = CRASH_FAULT_NONE;
+        ipc_shared_data.crash_report.from_ns = 0;
+        ipc_shared_data.crash_report.cfsr    = 0;
+        ipc_shared_data.crash_report.sfsr    = 0;
+        ipc_shared_data.crash_report.pc      = 0;
+        ipc_shared_data.crash_report.lr      = 0;
+        ipc_shared_data.crash_report.sp      = 0;
+        ipc_shared_data.crash_report.psr     = 0;
     }
     crash_latch.magic = 0;
 

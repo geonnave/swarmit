@@ -74,6 +74,10 @@ __attribute__ ((weak, alias("Dummy_Handler"))) void SysTick_Handler(void);
 
 void HardFault_Handler(void);
 void SecureFault_Handler(void);
+// Strong definition below, so it must not also appear in the weak-alias list -
+// a weak alias and a definition of one symbol in one translation unit is a
+// redefinition error.
+void WDT0_IRQHandler(void);
 
 // External interrupts handlers
 __attribute__ ((weak, alias("Dummy_Handler"))) void FPU_IRQHandler(void);
@@ -92,7 +96,6 @@ __attribute__ ((weak, alias("Dummy_Handler"))) void TIMER1_IRQHandler(void);
 __attribute__ ((weak, alias("Dummy_Handler"))) void TIMER2_IRQHandler(void);
 __attribute__ ((weak, alias("Dummy_Handler"))) void RTC0_IRQHandler(void);
 __attribute__ ((weak, alias("Dummy_Handler"))) void RTC1_IRQHandler(void);
-__attribute__ ((weak, alias("Dummy_Handler"))) void WDT0_IRQHandler(void);
 __attribute__ ((weak, alias("Dummy_Handler"))) void WDT1_IRQHandler(void);
 __attribute__ ((weak, alias("Dummy_Handler"))) void COMP_LPCOMP_IRQHandler(void);
 __attribute__ ((weak, alias("Dummy_Handler"))) void EGU0_IRQHandler(void);
@@ -351,6 +354,30 @@ void SecureFault_Handler(void) {
          "2:                        ;"
          "mov    R1, LR             ;"  // EXC_RETURN passed through R1.
          "b      SecureFaultHandler ;"  // Stack frame passed through R0.
+    );
+}
+
+// WDT0's TIMEOUT interrupt exists only to answer "where was the app stuck?".
+// Same trampoline as the fault handlers, and for the same reason: WDT0 is
+// secure and the interrupted context is normally the non-secure application,
+// so its stack frame is on the non-secure stack.
+void WDT0_IRQHandler(void) {
+    __ASM(
+         "tst    LR, #0x40              ;"  // EXC_RETURN bit 6 (S): secure background?
+         "bne    1f                     ;"
+         "tst    LR, #4                 ;"  // non-secure background: pick NS stack
+         "ite    EQ                     ;"
+         "mrseq  R0, MSP_NS             ;"
+         "mrsne  R0, PSP_NS             ;"
+         "b      2f                     ;"
+         "1:                            ;"
+         "tst    LR, #4                 ;"  // secure background: pick secure stack
+         "ite    EQ                     ;"
+         "mrseq  R0, MSP                ;"
+         "mrsne  R0, PSP                ;"
+         "2:                            ;"
+         "mov    R1, LR                 ;"  // EXC_RETURN passed through R1.
+         "b      crash_latch_watchdog   ;"  // Stack frame passed through R0.
     );
 }
 

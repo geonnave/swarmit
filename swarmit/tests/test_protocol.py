@@ -5,7 +5,8 @@ from swarmit.testbed.protocol import (
     IMAGE_DIGEST_LEN,
     INFO_GEN_SIZE,
     INFO_STRING_LEN,
-    STATUS_LEGACY_SIZE,
+    STATUS_BASE_SIZE,
+    FaultType,
     PayloadDeviceInfo,
     PayloadOTAStart,
     PayloadRequestMessage,
@@ -13,6 +14,7 @@ from swarmit.testbed.protocol import (
     PayloadType,
     boot_reason,
     decode_cfsr,
+    decode_ipsr,
     decode_reset_reason,
     decode_sfsr,
     decode_string_field,
@@ -37,7 +39,7 @@ def test_payload_status_round_trip():
         info_gen=7,
     )
     raw = payload.to_bytes()
-    assert len(raw) == STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE + INFO_GEN_SIZE
+    assert len(raw) == STATUS_BASE_SIZE + CRASH_REPORT_SIZE + INFO_GEN_SIZE
 
     parsed = PayloadStatus().from_bytes(bytes(raw))
     assert parsed.info_gen == 7
@@ -53,25 +55,6 @@ def test_payload_status_round_trip():
     assert parsed.sfsr == 0x8
     assert parsed.pc == 0x0001_2345
     assert parsed.lr == 0x0001_2340
-
-
-def test_payload_status_legacy_frame():
-    # Status payload from firmware without crash-report support: 12 bytes,
-    # crash report fields parse as zero.
-    legacy = PayloadStatus(
-        device=1, status=1, battery=2900, pos_x=42, pos_y=43
-    ).to_bytes()[:STATUS_LEGACY_SIZE]
-
-    parsed = PayloadStatus().from_bytes(bytes(legacy))
-    assert parsed.device == 1
-    assert parsed.status == 1
-    assert parsed.battery == 2900
-    assert parsed.pos_x == 42
-    assert parsed.pos_y == 43
-    assert parsed.reset_reason == 0
-    assert parsed.fault == 0
-    assert parsed.from_ns == 0
-    assert parsed.pc == 0
 
 
 def test_payload_status_truncated_frame_raises():
@@ -108,17 +91,6 @@ def test_decode_sfsr():
     # NS write into a secure region -> attribution unit violation
     assert decode_sfsr(1 << 3) == "AUVIOL"
     assert decode_sfsr(1 << 0) == "INVEP"
-
-
-def test_payload_status_pre_generation_frame():
-    # Firmware with a crash report but no generation counter: the frame is one
-    # byte short and must still parse, reporting generation 0.
-    frame = PayloadStatus(device=1, status=1, battery=2900).to_bytes()[
-        : STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE
-    ]
-    parsed = PayloadStatus().from_bytes(bytes(frame))
-    assert parsed.battery == 2900
-    assert parsed.info_gen == 0
 
 
 def test_device_info_matches_firmware_wire_size():
@@ -158,14 +130,21 @@ def test_payload_device_info_round_trip():
     assert parsed.lh2_flags == 0b11
 
 
-def test_payload_device_info_short_payload_does_not_raise():
-    # A bot running older firmware, or a truncated frame, parses as zeros
-    # rather than taking down the RX thread.
-    parsed = PayloadDeviceInfo().from_bytes(b"\x01\x05")
+def test_payload_device_info_short_payload_raises():
+    # A reply that is not the full record comes from a bot too old to talk to.
+    # Zero-filling it invented a device record; raising lets the adapter drop
+    # the frame and leaves the cached info untouched.
+    with pytest.raises(ValueError):
+        PayloadDeviceInfo().from_bytes(b"\x01\x05")
+
+
+def test_payload_device_info_tolerates_trailing_bytes():
+    # A device on a newer schema appends fields. The known prefix still parses
+    # and the rest is ignored, so the host does not need its own truncation.
+    full = bytes(PayloadDeviceInfo(info_version=1, info_gen=42).to_bytes())
+    parsed = PayloadDeviceInfo().from_bytes(full + b"\xde\xad\xbe\xef")
     assert parsed.info_version == 1
-    assert parsed.info_gen == 5
-    assert parsed.image_size == 0
-    assert decode_string_field(parsed.image_name) == ""
+    assert parsed.info_gen == 42
 
 
 def test_string_fields_are_nul_padded_and_truncated():
@@ -244,6 +223,10 @@ def test_image_digest_length_matches_firmware():
         (1 << 4, 0, "Unspecified"),
         # A latched fault wins over everything.
         (1 << 3, 1, "HardwareWatchdogReset"),
+        # A watchdog timeout latches fault=3 without any fault being raised.
+        # It is a genuine watchdog reset, so the Matter value is unchanged -
+        # the distinction lives in format_reset_cause, not here.
+        (1 << 1, 3, "HardwareWatchdogReset"),
     ],
 )
 def test_boot_reason_mapping(reset_reason, fault, expected):
@@ -254,3 +237,46 @@ def test_boot_reason_is_derived_not_transmitted():
     # The device does not send it: everything the mapping needs already rides
     # the status frame, so a fix is a host change rather than a reflash.
     assert not hasattr(PayloadDeviceInfo(), "boot_reason")
+
+
+def test_watchdog_timeout_rides_the_existing_crash_report():
+    """A hang reuses fault, pc and lr rather than adding fields of its own.
+
+    Spending a fault enumerator keeps the two cases - crashed and hung - in
+    one shape, so everything that reads a crash report reads both without
+    branching on which kind it is.
+    """
+    payload = PayloadStatus(
+        device=1,
+        status=2,
+        reset_reason=0x2,  # watchdog0
+        fault=FaultType.WatchdogTimeout.value,
+        from_ns=1,
+        pc=0x0001_3A4E,
+        lr=0x0001_39C0,
+    )
+    raw = payload.to_bytes()
+    assert len(raw) == STATUS_BASE_SIZE + CRASH_REPORT_SIZE + INFO_GEN_SIZE
+
+    parsed = PayloadStatus().from_bytes(bytes(raw))
+    assert parsed.fault == 3
+    assert parsed.from_ns == 1
+    assert parsed.pc == 0x0001_3A4E
+    assert parsed.lr == 0x0001_39C0
+    # No fault was raised, so the fault-status registers stay empty.
+    assert parsed.cfsr == 0
+    assert parsed.sfsr == 0
+
+
+@pytest.mark.parametrize(
+    "psr,expected",
+    [
+        (0x0100_0000, "thread"),  # T bit set, IPSR 0: ordinary app code
+        (0x0100_0003, "HardFault"),
+        (0x0100_000F, "SysTick"),
+        (0x0100_001A, "IRQ 10"),  # 26 - 16
+        (0x0000_0009, "exception 9"),  # reserved, reported honestly
+    ],
+)
+def test_decode_ipsr(psr, expected):
+    assert decode_ipsr(psr) == expected

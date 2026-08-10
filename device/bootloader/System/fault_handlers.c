@@ -22,12 +22,34 @@ void crash_latch_fault(uint32_t fault, uint32_t *sp, uint32_t exc_return) {
     crash_latch.sfsr    = SCB->SFSR;
     crash_latch.pc      = 0;
     crash_latch.lr      = 0;
+    crash_latch.psr     = 0;
+    // The frame address is the interrupted context's stack pointer, and unlike
+    // the words inside the frame it costs no dereference - so it is recorded
+    // before the magic, and survives even a stacking error that makes the rest
+    // unreadable.
+    crash_latch.sp = (uint32_t)sp;
     // Magic is set before touching the stacked frame: reading it can fault
     // again (e.g. after a stacking error), in which case the latch stays
-    // valid with pc/lr zeroed.
+    // valid with pc/lr/psr zeroed.
     crash_latch.magic = CRASH_LATCH_MAGIC;
     crash_latch.lr    = sp[5];
     crash_latch.pc    = sp[6];
+    crash_latch.psr   = sp[7];
+}
+
+void crash_latch_watchdog(uint32_t *sp, uint32_t exc_return) {
+    NRF_WDT0_S->EVENTS_TIMEOUT = 0;
+    // A fault handler that already latched is spinning on purpose, waiting for
+    // exactly this timeout. Its snapshot names the fault; this one would only
+    // name the spin loop.
+    if (crash_latch.magic != CRASH_LATCH_MAGIC) {
+        crash_latch_fault(CRASH_FAULT_WATCHDOG, sp, exc_return);
+    }
+    // The reset is already committed - two 32.768 kHz cycles from the TIMEOUT
+    // event - so there is nothing to return to.
+    while (1) {
+        __NOP();
+    }
 }
 
 void HardFaultHandler(uint32_t *sp, uint32_t exc_return) {

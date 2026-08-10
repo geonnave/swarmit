@@ -57,6 +57,7 @@ from swarmit.testbed.protocol import (
     PayloadType,
     StatusType,
     decode_cfsr,
+    decode_ipsr,
     decode_reset_reason,
     decode_sfsr,
     decode_string_field,
@@ -238,6 +239,8 @@ class NodeStatus:
     sfsr: int = 0
     pc: int = 0
     lr: int = 0
+    sp: int = 0
+    psr: int = 0
     raw: str = ""  # hex of the full status packet as received
     last_updated_at: float = 0
     # Generation counter as of the most recent status frame. When it differs
@@ -331,6 +334,11 @@ def format_reset_cause(device_data) -> str:
         # lockup if the fault handler itself wedged) - it disambiguates the
         # crash path at a glance.
         reset_name = decode_reset_reason(rr)
+        if device_data.fault == FaultType.WatchdogTimeout.value:
+            # No fault was raised here - the application just missed its
+            # deadline. Calling that "crashed" sends an operator hunting for a
+            # fault that does not exist; the pc is the whole answer.
+            return f"hung ({reset_name} pc=0x{device_data.pc:08x})"
         if device_data.fault:
             return (
                 f"crashed ({reset_name} {_fault_name(device_data)} "
@@ -691,19 +699,33 @@ def generate_info(status_data, devices=[], show_raw=False):
             + (" (secure)" if d.fault and not d.from_ns else ""),
         )
         if d.fault:
-            cfsr_bits = decode_cfsr(d.cfsr)
-            sfsr_bits = decode_sfsr(d.sfsr)
-            table.add_row(
-                "  cfsr",
-                f"0x{d.cfsr:08x}" + (f" ({cfsr_bits})" if cfsr_bits else ""),
-            )
-            table.add_row(
-                "  sfsr",
-                f"0x{d.sfsr:08x}" + (f" ({sfsr_bits})" if sfsr_bits else ""),
-            )
+            # Only a real fault sets these. A watchdog timeout raised none, so
+            # both registers read zero - printing them invites the reader to
+            # decode a status that was never populated.
+            if d.fault in (
+                FaultType.HardFault.value,
+                FaultType.SecureFault.value,
+            ):
+                cfsr_bits = decode_cfsr(d.cfsr)
+                sfsr_bits = decode_sfsr(d.sfsr)
+                table.add_row(
+                    "  cfsr",
+                    f"0x{d.cfsr:08x}"
+                    + (f" ({cfsr_bits})" if cfsr_bits else ""),
+                )
+                table.add_row(
+                    "  sfsr",
+                    f"0x{d.sfsr:08x}"
+                    + (f" ({sfsr_bits})" if sfsr_bits else ""),
+                )
             elf = "app image" if d.from_ns else "bootloader image"
             table.add_row("  pc", f"0x{d.pc:08x}  (resolve against {elf})")
             table.add_row("  lr", f"0x{d.lr:08x}")
+            table.add_row("  sp", f"0x{d.sp:08x}")
+            # The IPSR decode is the point of carrying psr: it says whether the
+            # bot was in an interrupt handler, which a pc in a shared driver
+            # function cannot tell you on its own.
+            table.add_row("  psr", f"0x{d.psr:08x}  (in {decode_ipsr(d.psr)})")
 
         # Both raw packets together, because the pair is what makes the two
         # channels legible: the status frame arrives every second and its last
@@ -1127,6 +1149,8 @@ class Controller:
                 sfsr=packet.payload.sfsr,
                 pc=packet.payload.pc,
                 lr=packet.payload.lr,
+                sp=packet.payload.sp,
+                psr=packet.payload.psr,
                 raw=packet.to_bytes().hex(),
                 last_updated_at=now,
                 info_gen=packet.payload.info_gen,

@@ -94,6 +94,10 @@ class FaultType(Enum):
     NoFault = 0
     HardFault = 1
     SecureFault = 2
+    # No fault was raised: WDT0 timed out because the application stopped
+    # reloading it. pc/lr name where it was stuck; cfsr/sfsr are structurally
+    # zero, so the inspect view skips them for this one.
+    WatchdogTimeout = 3
 
 
 # nRF5340 application core RESETREAS flags (bit position -> short label).
@@ -180,11 +184,44 @@ def decode_sfsr(sfsr: int) -> str:
     return _decode_flags(sfsr, SFSR_FLAGS)
 
 
-# Size of the status payload sent by firmware without crash-report support.
-STATUS_LEGACY_SIZE = 12
+# ARMv8-M exception numbers, as they appear in xPSR's IPSR field. Numbers at or
+# above 16 are external interrupts, IRQ = number - 16.
+IPSR_EXCEPTIONS = {
+    0: "thread",
+    2: "NMI",
+    3: "HardFault",
+    4: "MemManage",
+    5: "BusFault",
+    6: "UsageFault",
+    7: "SecureFault",
+    11: "SVCall",
+    12: "DebugMonitor",
+    14: "PendSV",
+    15: "SysTick",
+}
+
+
+def decode_ipsr(psr: int) -> str:
+    """Name the exception the interrupted context was running in.
+
+    IPSR is the low 9 bits of xPSR. `thread` means ordinary application code;
+    anything else means the hang or fault happened inside a handler, which is
+    the one thing this field tells you that the pc alone does not - a pc in a
+    driver function reads the same either way.
+    """
+    number = psr & 0x1FF
+    if number in IPSR_EXCEPTIONS:
+        return IPSR_EXCEPTIONS[number]
+    if number >= 16:
+        return f"IRQ {number - 16}"
+    return f"exception {number}"
+
+
+# The fixed head of the status payload: device, status, battery, position.
+STATUS_BASE_SIZE = 12
 # Size of the crash report appended to status payloads (mirrors
 # ipc_crash_report_t in the swarmit firmware).
-CRASH_REPORT_SIZE = 22
+CRASH_REPORT_SIZE = 30
 # Size of the generation counter appended after the crash report.
 INFO_GEN_SIZE = 1
 
@@ -321,6 +358,8 @@ class PayloadStatus(Payload):
             PayloadFieldMetadata(name="sfsr", disp="sfsr", length=4),
             PayloadFieldMetadata(name="pc", disp="pc", length=4),
             PayloadFieldMetadata(name="lr", disp="lr", length=4),
+            PayloadFieldMetadata(name="sp", disp="sp", length=4),
+            PayloadFieldMetadata(name="psr", disp="psr", length=4),
             PayloadFieldMetadata(name="info_gen", disp="gen"),
         ]
     )
@@ -337,21 +376,18 @@ class PayloadStatus(Payload):
     sfsr: int = 0
     pc: int = 0
     lr: int = 0
+    sp: int = 0
+    psr: int = 0
     # Changes whenever anything in the device-info block changes. The
     # controller refetches on any difference from what it cached, so the
     # steady state costs no device-info traffic at all.
     info_gen: int = 0
 
-    def from_bytes(self, bytes_):
-        # Each block was appended to this frame in a different release, so a
-        # short payload means "that firmware predates this field", not a
-        # corrupt frame. Zero-fill the missing tail so a mixed fleet keeps
-        # reporting status through a rollout.
-        if len(bytes_) == STATUS_LEGACY_SIZE:
-            bytes_ = bytes(bytes_) + bytes(CRASH_REPORT_SIZE)
-        if len(bytes_) == STATUS_LEGACY_SIZE + CRASH_REPORT_SIZE:
-            bytes_ = bytes(bytes_) + bytes(INFO_GEN_SIZE)
-        return super().from_bytes(bytes_)
+    # There is deliberately no upgrade path for a shorter frame. Firmware and
+    # host ship together, so a payload of any other shape comes from a bot too
+    # old to talk to: the adapter drops the frame and the bot never appears,
+    # which is the wanted outcome. Reflashing is the fix, and `swarm flash`
+    # already refuses those bots by bootloader version.
 
 
 @dataclass
@@ -693,14 +729,12 @@ class PayloadDeviceInfo(Payload):
     lh2_homography_count: int = 0
     lh2_flags: int = 0
 
-    def from_bytes(self, bytes_):
-        # A device speaking a newer schema appends fields; parse the prefix we
-        # know and ignore the rest rather than refusing the whole reply. A
-        # short payload is zero-filled for the same reason the status frame
-        # is: it means "older firmware", not "corrupt".
-        if len(bytes_) < self.size:
-            bytes_ = bytes(bytes_) + bytes(self.size - len(bytes_))
-        return super().from_bytes(bytes_[: self.size])
+    # No from_bytes override, for the same reason PayloadStatus has none: a
+    # reply that is not this shape comes from a bot too old to talk to, and
+    # zero-filling it invented a record rather than reporting nothing. It now
+    # raises, the adapter drops the frame, and the cached info simply does not
+    # update. Trailing bytes from a newer schema need no handling either - the
+    # base parser consumes the fields it knows and ignores the rest.
 
 
 @dataclass

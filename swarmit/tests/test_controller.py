@@ -22,7 +22,11 @@ from swarmit.testbed.controller import (
 )
 from swarmit.testbed.logger import setup_logging
 from swarmit.testbed.ota import BlockOTASettings
-from swarmit.testbed.protocol import OTA_PROTOCOL_VERSION_LEGACY, StatusType
+from swarmit.testbed.protocol import (
+    OTA_PROTOCOL_VERSION_LEGACY,
+    FaultType,
+    StatusType,
+)
 from swarmit.tests.utils import (
     ChunkLossStrategy,
     MarilibMQTTAdapterMock,
@@ -1073,6 +1077,35 @@ def test_reset_reason_row_drops_a_redundant_decode():
     assert decode_reset_reason(0x1C) == "ctrl-ap+soft-reset+lockup"
     assert format_reset_cause(multi) == "lockup"
     assert decode_reset_reason(0x1C) != format_reset_cause(multi)
+
+
+def test_a_hang_is_not_reported_as_a_crash():
+    """A watchdog timeout raised no fault, so "crashed" would misdirect.
+
+    The operator-facing distinction is the point of the whole change: "hung"
+    plus an address sends someone to the function that overran, where
+    "crashed" sends them looking for a fault status that was never populated.
+    """
+    hung = NodeStatus(
+        reset_reason=0x2,  # watchdog0
+        fault=FaultType.WatchdogTimeout.value,
+        pc=0x0001_3A4E,
+    )
+    assert format_reset_cause(hung) == "hung (watchdog0 pc=0x00013a4e)"
+
+    crashed = NodeStatus(
+        reset_reason=0x2,
+        fault=FaultType.HardFault.value,
+        pc=0x0001_3A4E,
+    )
+    assert format_reset_cause(crashed).startswith(
+        "crashed (watchdog0 HardFault"
+    )
+
+    # Firmware predating the capture, and the case where the handler could not
+    # run: WDT0 fired with nothing latched. Still a crash, still no address.
+    silent = NodeStatus(reset_reason=0x2)
+    assert format_reset_cause(silent) == "crashed (watchdog0)"
 
 
 def test_info_panel_does_not_repeat_the_boot_reason():
