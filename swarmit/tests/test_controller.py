@@ -18,6 +18,7 @@ from swarmit.testbed.controller import (
     format_reset_cause,
     format_uptime,
     generate_info,
+    generate_status,
     image_mismatches,
 )
 from swarmit.testbed.logger import setup_logging
@@ -1318,6 +1319,147 @@ def test_a_generation_change_cancels_the_backoff():
 
     assert addr not in controller._info_backoff
     assert controller.stale_device_info() == [addr]
+
+    node.stop()
+    controller.terminate()
+
+
+def _render(renderable, width: int = 200) -> str:
+    """Capture a rich renderable as plain text, wide enough not to wrap."""
+    from rich.console import Console
+
+    console = Console(width=width, no_color=True)
+    with console.capture() as cap:
+        console.print(renderable)
+    return cap.get()
+
+
+def test_info_panel_always_names_the_calibration_state():
+    """Three facts, three strings - never the absence of a row.
+
+    Dropping the row when device info had not landed made "we never asked"
+    look exactly like "this bot is uncalibrated", which are opposite actions
+    for the operator: wait, versus go and re-provision it.
+    """
+    never_asked = {"AA": NodeStatus(info=None)}
+    assert "unknown (no device info)" in _render(
+        generate_info(never_asked, [])
+    )
+
+    uncalibrated = {"AA": NodeStatus(info=DeviceInfo(info_version=1))}
+    out = _render(generate_info(uncalibrated, []))
+    assert "LH2 calibration" in out
+    assert "uncalibrated" in out
+
+    calibrated = {
+        "AA": NodeStatus(
+            info=DeviceInfo(
+                info_version=1, lh2_homography_count=2, lh2_flags=0b11
+            )
+        )
+    }
+    assert "2 basestations (valid, from flash)" in _render(
+        generate_info(calibrated, [])
+    )
+
+
+def test_a_single_basestation_is_not_pluralised():
+    info = DeviceInfo(info_version=1, lh2_homography_count=1, lh2_flags=0b01)
+    assert info.lh2_summary == "1 basestation (valid)"
+
+
+def test_position_says_no_fix_instead_of_the_origin():
+    """(0, 0) is what an unlocated bot reports, not where it is.
+
+    The calibrated square starts two of its own widths from the origin, so a
+    located bot cannot report (0, 0) - printing it as a coordinate claimed a
+    fix that never happened, on both surfaces.
+    """
+    unlocated = {"AA": NodeStatus(last_updated_at=time.time())}
+    assert "no fix" in _render(generate_info(unlocated, []))
+    assert "no fix" in _render(generate_status(unlocated))
+
+    located = {"AA": NodeStatus(pos_x=1200, pos_y=1300)}
+    assert "(1200, 1300)" in _render(generate_info(located, []))
+    assert "(1200, 1300)" in _render(generate_status(located))
+
+
+def test_status_collapses_calibration_when_the_fleet_agrees():
+    """One arena, one calibration run - so normally one value, stated once.
+
+    Same treatment as the sandbox-firmware column: spending table width to
+    repeat one string per row is what stops the fleet laying out side by side.
+    """
+    info = DeviceInfo(info_version=1, lh2_homography_count=2, lh2_flags=0b11)
+    fleet = {
+        "AA": NodeStatus(info=info),
+        "BB": NodeStatus(info=info),
+    }
+    out = _render(generate_status(fleet))
+
+    assert "LH2 calibration: 2 basestations (valid, from flash)" in out
+    # Stated once above the table, not once per row.
+    assert out.count("2 basestations") == 1
+
+
+def test_status_shows_the_calibration_column_when_the_fleet_disagrees():
+    """A bot out of step with the fleet is the case worth a column."""
+    fleet = {
+        "AA": NodeStatus(
+            info=DeviceInfo(
+                info_version=1, lh2_homography_count=2, lh2_flags=0b11
+            )
+        ),
+        "BB": NodeStatus(info=DeviceInfo(info_version=1)),
+        "CC": NodeStatus(info=None),
+    }
+    out = _render(generate_status(fleet))
+
+    assert "LH2 calibration: " not in out  # no header line
+    assert "2 basestations" in out
+    assert "uncalibrated" in out
+
+
+@patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
+@patch("swarmit.testbed.controller.INACTIVE_TIMEOUT", 5)
+@patch("swarmit.testbed.controller.DEVICE_INFO_TIMEOUT", 1.0)
+@patch(
+    "swarmit.testbed.adapter.MarilibSerialAdapter", MarilibSerialAdapterMock
+)
+def test_calibration_and_position_reach_the_panel_from_the_wire():
+    """End to end: an emulated bot's LH2 state survives the round trip.
+
+    The rendering tests above build `DeviceInfo` directly, so they would still
+    pass if `from_payload` stopped copying the fields. This drives a node over
+    the mock adapter instead, so the values are parsed off a real packet.
+    """
+    controller = Controller(ControllerSettings(adapter_wait_timeout=0.1))
+    test_adapter = controller.interface.mari.serial_interface
+    node = SwarmitNode(
+        address=0x77,
+        adapter=test_adapter,
+        info_gen=3,
+        lh2_homography_count=2,
+        lh2_flags=0b11,
+        pos_x=1200,
+        pos_y=1300,
+    )
+    test_adapter.add_node(node)
+    addr = f"{node.address:08X}"
+
+    deadline = time.time() + 3
+    while time.time() < deadline and controller.status_data.get(addr) is None:
+        time.sleep(0.01)
+
+    controller.fetch_device_info([addr])
+    info = controller.status_data[addr].info
+    assert info is not None
+    assert info.lh2_homography_count == 2
+    assert info.lh2_flags == 0b11
+
+    out = _render(generate_info(controller.status_data, []))
+    assert "2 basestations (valid, from flash)" in out
+    assert "(1200, 1300)" in out
 
     node.stop()
     controller.terminate()
