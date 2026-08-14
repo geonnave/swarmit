@@ -94,6 +94,10 @@ class SwarmitNode(threading.Thread):
         image_name: str = "",
         image_version: str = "",
         answers_device_info: bool = True,
+        lh2_homography_count: int = 0,
+        lh2_flags: int = 0,
+        pos_x: int = 0,
+        pos_y: int = 0,
     ):
         self.adapter = adapter
         self.address = address
@@ -115,6 +119,14 @@ class SwarmitNode(threading.Thread):
         self.image_name = image_name
         self.image_version = image_version
         self.answers_device_info = answers_device_info
+        # LH2 state, as the net core reports it: the count doubles as the
+        # basestation count, and the flags say the calibration is usable and
+        # where it came from. Defaults are the uncalibrated bot, which is also
+        # a bot that can never produce a fix - hence the (0, 0) position.
+        self.lh2_homography_count = lh2_homography_count
+        self.lh2_flags = lh2_flags
+        self.pos_x = pos_x
+        self.pos_y = pos_y
         # Staged by OTA_START, promoted to the reported image only once
         # FINALIZE verifies - so a failed transfer never renames the image.
         self._pending_name = ""
@@ -149,8 +161,8 @@ class SwarmitNode(threading.Thread):
                         device=self.device_type.value,
                         status=self.status.value,
                         battery=self.battery,
-                        pos_x=2500,
-                        pos_y=2500,
+                        pos_x=self.pos_x,
+                        pos_y=self.pos_y,
                         info_gen=self.info_gen,
                     ),
                 )
@@ -265,6 +277,8 @@ class SwarmitNode(threading.Thread):
                         ),
                         image_name=encode_string_field(self.image_name),
                         image_version=encode_string_field(self.image_version),
+                        lh2_homography_count=self.lh2_homography_count,
+                        lh2_flags=self.lh2_flags,
                     )
                 )
             )

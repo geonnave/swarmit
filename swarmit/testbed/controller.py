@@ -211,8 +211,11 @@ class DeviceInfo:
     def lh2_summary(self) -> str:
         if not self.lh2_homography_count:
             return "uncalibrated"
+        # One homography is stored per basestation index, so the count is the
+        # number of lighthouses - which is what an operator can check against
+        # the room, where "homographies" needs translating first.
         noun = (
-            "homography" if self.lh2_homography_count == 1 else "homographies"
+            "basestation" if self.lh2_homography_count == 1 else "basestations"
         )
         flags = []
         if self.lh2_flags & LH2_FLAG_VALID:
@@ -466,10 +469,66 @@ def format_sandbox_fw(info: DeviceInfo | None) -> str:
     return version
 
 
+def format_lh2_calibration(info: DeviceInfo | None) -> str:
+    """The calibration line, including the case where nothing is known.
+
+    A device that never answered and a device reporting zero homographies are
+    different facts, and an operator acts on each differently: one is a bot to
+    re-provision, the other is a fetch that has not landed yet. Dropping the
+    line for the first case made them look identical.
+    """
+    if info is None:
+        return "unknown (no device info)"
+    return info.lh2_summary
+
+
+def format_lh2_cell(info: DeviceInfo | None) -> str:
+    """The compact form of the calibration state, for the fleet table.
+
+    Same vocabulary as the image cell: "-" for a bot that has not answered,
+    "none" for one that answered and carries no calibration. The column only
+    appears when the fleet disagrees, where the question is which bots differ
+    rather than how each was provisioned, so the count alone carries it and
+    the full summary stays in the header line and the per-device panel. The
+    summary spelled out per row wraps to four lines in a table this wide.
+    """
+    if info is None:
+        return "-"
+    if not info.lh2_homography_count:
+        return "none"
+    return str(info.lh2_homography_count)
+
+
+def format_position(status: NodeStatus) -> str:
+    """Where the bot is, or that it has never been located.
+
+    `current_position` in shared memory is zero-initialised and only written
+    once a fix succeeds, and the fix cannot succeed at all without a loaded
+    calibration - so (0, 0) is what an unlocated bot reports, permanently for
+    an uncalibrated one. The calibrated arena sits two of its own widths away
+    from the origin, so a real fix cannot land there; printing it as a
+    coordinate only invites the reader to believe a fix exists.
+    """
+    if status.pos_x == 0 and status.pos_y == 0:
+        return "no fix"
+    return f"{status.pos_x}, {status.pos_y}"
+
+
 FW_CELL = 6  # index of the sandbox-fw cell in a status row
+LH2_CELL = 7  # index of the LH2-calibration cell in a status row
 
 
-def _status_table(rows, show_fw: bool = True) -> Table:
+def _visible_cells(row, show_fw: bool, show_lh2: bool) -> tuple:
+    """Drop the cells whose column collapsed into the header this run."""
+    hidden = set()
+    if not show_fw:
+        hidden.add(FW_CELL)
+    if not show_lh2:
+        hidden.add(LH2_CELL)
+    return tuple(cell for i, cell in enumerate(row) if i not in hidden)
+
+
+def _status_table(rows, show_fw: bool = True, show_lh2: bool = True) -> Table:
     """One status table over `rows`, each a tuple of preformatted cells."""
     table = Table()
     table.add_column("Device Addr", style="magenta", no_wrap=True)
@@ -487,15 +546,17 @@ def _status_table(rows, show_fw: bool = True) -> Table:
         table.add_column(
             "Sandbox fw (bl / net)", style="cyan", justify="center"
         )
+    if show_lh2:
+        table.add_column("LH2", style="cyan", justify="center")
     table.add_column("Last reset", style="cyan", justify="center")
     for row in rows:
-        table.add_row(
-            *(row if show_fw else row[:FW_CELL] + row[FW_CELL + 1 :])
-        )
+        table.add_row(*_visible_cells(row, show_fw, show_lh2))
     return table
 
 
-def _status_columns(rows, show_fw: bool = True, console=None):
+def _status_columns(
+    rows, show_fw: bool = True, show_lh2: bool = True, console=None
+):
     """Lay the rows out in newspaper columns when one table would not fit.
 
     A hundred-bot fleet is one row per bot and far taller than any terminal,
@@ -507,7 +568,7 @@ def _status_columns(rows, show_fw: bool = True, console=None):
     Below that threshold nothing changes: one table, exactly as before.
     """
     console = console or get_console()
-    single = _status_table(rows, show_fw=show_fw)
+    single = _status_table(rows, show_fw=show_fw, show_lh2=show_lh2)
     if not rows:
         return single
 
@@ -525,7 +586,10 @@ def _status_columns(rows, show_fw: bool = True, console=None):
     per = -(-len(rows) // n)  # ceil, so the last column is the short one
     chunks = [rows[i : i + per] for i in range(0, len(rows), per)]
     return Columns(
-        [_status_table(chunk, show_fw=show_fw) for chunk in chunks],
+        [
+            _status_table(chunk, show_fw=show_fw, show_lh2=show_lh2)
+            for chunk in chunks
+        ],
         padding=(0, 1),
         expand=False,
     )
@@ -561,10 +625,11 @@ def generate_status(status_data, devices=[], status_message="found"):
                 f"{device_addr}",
                 f"{device_data.device.name}",
                 f"[{battery_level_color(device_data.battery)}]{device_data.battery / 1000:.2f}V ({int(device_data.battery / 3000 * 100)}%)",
-                f"({device_data.pos_x}, {device_data.pos_y})",
+                format_position(device_data),
                 f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
                 image,
                 format_sandbox_fw(info),
+                format_lh2_cell(info),
                 f"[{reset_cause_color(device_data)}]{format_reset_cause(device_data)}",
             )
         )
@@ -583,7 +648,23 @@ def generate_status(status_data, devices=[], status_message="found"):
                 header, Text.from_markup(f"Sandbox fw (bl / net): {only}\n")
             )
 
-    table = _status_columns(rows, show_fw=show_fw)
+    # One arena, one calibration run, so calibration has the same distribution
+    # as the sandbox version above and earns a column on the same terms.
+    # Compared on the full summary rather than the count in the cell, so a
+    # fleet that agrees on the count but not on the flags still gets a column.
+    lh2_summaries = {
+        device_data.info.lh2_summary if device_data.info else "-"
+        for device_data in data.values()
+    }
+    show_lh2 = len(lh2_summaries) > 1
+    if not show_lh2:
+        only = next(iter(lh2_summaries))
+        if only != "-":
+            header = Text.assemble(
+                header, Text.from_markup(f"LH2 calibration: {only}\n")
+            )
+
+    table = _status_columns(rows, show_fw=show_fw, show_lh2=show_lh2)
     if not odd_ones:
         return Group(header, table)
 
@@ -640,7 +721,7 @@ def generate_info(status_data, devices=[], show_raw=False):
             f"[{battery_level_color(d.battery)}]{d.battery / 1000:.2f}V "
             f"({int(d.battery / 3000 * 100)}%)",
         )
-        table.add_row("Position", f"({d.pos_x}, {d.pos_y})")
+        table.add_row("Position", format_position(d))
         if d.last_updated_at:
             age = max(0.0, time.time() - d.last_updated_at)
             table.add_row("Last update", f"{age:.1f}s ago")
@@ -666,7 +747,6 @@ def generate_info(status_data, devices=[], show_raw=False):
             table.add_row("", "")
             table.add_row("Sandbox fw", f"bootloader  {info.bl_version}")
             table.add_row("", f"netcore     {info.net_version}")
-            table.add_row("LH2 calibration", info.lh2_summary)
             # Boot count only. Why it booted is answered twice below, in more
             # detail and from the authoritative register - a third rendering,
             # in the coarse Matter vocabulary, is noise here. That mapping
@@ -676,6 +756,11 @@ def generate_info(status_data, devices=[], show_raw=False):
                 f"{format_uptime(info.uptime_s)}   "
                 f"(boot #{info.boot_count})",
             )
+
+        # Outside the device-info block on purpose: a bot that has not answered
+        # still gets a calibration line, saying so, rather than none at all.
+        table.add_row("", "")
+        table.add_row("LH2 calibration", format_lh2_calibration(d.info))
 
         table.add_row("", "")
         table.add_row(
