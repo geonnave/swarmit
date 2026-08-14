@@ -1403,7 +1403,13 @@ def test_status_collapses_calibration_when_the_fleet_agrees():
 
 
 def test_status_shows_the_calibration_column_when_the_fleet_disagrees():
-    """A bot out of step with the fleet is the case worth a column."""
+    """A bot out of step with the fleet is the case worth a column.
+
+    The cell carries the count, not the summary: spelled out per row it wraps
+    to four lines and the column stops being readable exactly when it matters.
+    "none" and "-" are the image cell's vocabulary, meaning the same two
+    things here - answered with nothing, versus never answered.
+    """
     fleet = {
         "AA": NodeStatus(
             info=DeviceInfo(
@@ -1416,8 +1422,30 @@ def test_status_shows_the_calibration_column_when_the_fleet_disagrees():
     out = _render(generate_status(fleet))
 
     assert "LH2 calibration: " not in out  # no header line
-    assert "2 basestations" in out
-    assert "uncalibrated" in out
+    assert "LH2" in out  # the column
+    # Compact, so it does not wrap: no row spells the summary out.
+    assert "2 basestations" not in out
+
+
+def test_status_compares_calibration_on_the_summary_not_the_count():
+    """Same count, different provenance, is still a fleet that disagrees.
+
+    Comparing the rendered cell would collapse these two into one header line
+    asserting a provenance only one of them has.
+    """
+    fleet = {
+        "AA": NodeStatus(
+            info=DeviceInfo(
+                info_version=1, lh2_homography_count=2, lh2_flags=0b11
+            )
+        ),
+        "BB": NodeStatus(
+            info=DeviceInfo(
+                info_version=1, lh2_homography_count=2, lh2_flags=0b01
+            )
+        ),
+    }
+    assert "LH2 calibration: " not in _render(generate_status(fleet))
 
 
 @patch("swarmit.testbed.controller.COMMAND_TIMEOUT", 0.1)
