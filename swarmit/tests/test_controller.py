@@ -1380,8 +1380,8 @@ def test_position_says_no_fix_instead_of_the_origin():
     assert "no fix" in _render(generate_status(unlocated))
 
     located = {"AA": NodeStatus(pos_x=1200, pos_y=1300)}
-    assert "(1200, 1300)" in _render(generate_info(located, []))
-    assert "(1200, 1300)" in _render(generate_status(located))
+    assert "1200, 1300" in _render(generate_info(located, []))
+    assert "1200, 1300" in _render(generate_status(located))
 
 
 def test_status_collapses_calibration_when_the_fleet_agrees():
@@ -1487,7 +1487,7 @@ def test_calibration_and_position_reach_the_panel_from_the_wire():
 
     out = _render(generate_info(controller.status_data, []))
     assert "2 basestations (valid, from flash)" in out
-    assert "(1200, 1300)" in out
+    assert "1200, 1300" in out
 
     node.stop()
     controller.terminate()

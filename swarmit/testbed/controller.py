@@ -511,7 +511,7 @@ def format_position(status: NodeStatus) -> str:
     """
     if status.pos_x == 0 and status.pos_y == 0:
         return "no fix"
-    return f"({status.pos_x}, {status.pos_y})"
+    return f"{status.pos_x}, {status.pos_y}"
 
 
 FW_CELL = 6  # index of the sandbox-fw cell in a status row
