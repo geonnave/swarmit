@@ -56,6 +56,8 @@ from swarmit.testbed.protocol import (
     PayloadStop,
     PayloadType,
     StatusType,
+    battery_level,
+    battery_pct,
     decode_cfsr,
     decode_ipsr,
     decode_reset_reason,
@@ -309,12 +311,11 @@ def addr_to_hex(addr: int) -> str:
     return hexlify(addr.to_bytes(8, "big")).decode().upper()
 
 
-def battery_level_color(level: int):
-    if level > VOLTAGE_FULL:
-        return "cyan"
-    if level > VOLTAGE_WARNING:
-        return "green"
-    return "red"
+def battery_level_color(device_data):
+    """Rich colour for the reading, on this robot's own battery profile."""
+    return {"full": "cyan", "ok": "green", "low": "red"}[
+        battery_level(device_data.device, device_data.battery)
+    ]
 
 
 def fault_name(device_data) -> str:
@@ -625,7 +626,8 @@ def generate_status(status_data, devices=[], status_message="found"):
             (
                 f"{device_addr}",
                 f"{device_data.device.name}",
-                f"[{battery_level_color(device_data.battery)}]{device_data.battery / 1000:.2f}V ({int(device_data.battery / 3000 * 100)}%)",
+                f"[{battery_level_color(device_data)}]{device_data.battery / 1000:.2f}V "
+                f"({battery_pct(device_data.device, device_data.battery)}%)",
                 format_position(device_data),
                 f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
                 image,
@@ -719,8 +721,8 @@ def generate_info(status_data, devices=[], show_raw=False):
         table.add_row("Status", d.status.name)
         table.add_row(
             "Battery",
-            f"[{battery_level_color(d.battery)}]{d.battery / 1000:.2f}V "
-            f"({int(d.battery / 3000 * 100)}%)",
+            f"[{battery_level_color(d)}]{d.battery / 1000:.2f}V "
+            f"({battery_pct(d.device, d.battery)}%)",
         )
         table.add_row("Position", format_position(d))
         if d.last_updated_at:

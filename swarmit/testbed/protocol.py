@@ -33,6 +33,69 @@ class DeviceType(Enum):
     nRF52840DK = 4
 
 
+@dataclass(frozen=True)
+class BatteryProfile:
+    """How one robot's pack maps voltage onto remaining charge.
+
+    Per device type because the pack differs. The v3 runs a supercapacitor:
+    stored energy goes as V^2, and the robot browns out at `empty_mv` rather
+    than at zero, so a straight voltage ratio badly overstates what is left -
+    it reads 20% on a v3 that can no longer move. A battery-backed robot holds
+    its voltage far better across a discharge and is closer to linear.
+    """
+
+    full_mv: int  # 100%
+    empty_mv: int  # 0%: below this the robot does not run
+    warning_mv: int  # below this the reading is shown as critical
+    supercap: bool = False  # energy goes as V^2 rather than as V
+
+
+# v3: 3.0 V supercapacitor, brownout at 0.6 V.
+_DOTBOT_V3_BATTERY = BatteryProfile(
+    full_mv=3000, empty_mv=600, warning_mv=1500, supercap=True
+)
+
+# Everything else keeps the historical straight-voltage reading. DotBotV2 is
+# battery-backed and wants its own profile; its real full/empty voltages have
+# not been measured, and guessing them would put a confident wrong number in
+# front of an operator.
+_DEFAULT_BATTERY = BatteryProfile(full_mv=3000, empty_mv=0, warning_mv=1500)
+
+BATTERY_PROFILES = {
+    DeviceType.DotBotV3: _DOTBOT_V3_BATTERY,
+}
+
+
+def battery_profile(device: DeviceType) -> BatteryProfile:
+    return BATTERY_PROFILES.get(device, _DEFAULT_BATTERY)
+
+
+def battery_pct(device: DeviceType, battery_mv: int) -> int:
+    """Charge remaining, 0-100, on the profile for this robot."""
+    p = battery_profile(device)
+    if p.supercap:
+        # A capacitor stores energy as 1/2 C V^2, so the usable fraction is the
+        # span between the squares, not between the voltages.
+        num = battery_mv**2 - p.empty_mv**2
+        den = p.full_mv**2 - p.empty_mv**2
+    else:
+        num = battery_mv - p.empty_mv
+        den = p.full_mv - p.empty_mv
+    if den <= 0:
+        return 0
+    return max(0, min(100, int(num / den * 100)))
+
+
+def battery_level(device: DeviceType, battery_mv: int) -> str:
+    """Band the reading falls in: full, ok or low."""
+    p = battery_profile(device)
+    if battery_mv > p.full_mv - 100:
+        return "full"
+    if battery_mv > p.warning_mv:
+        return "ok"
+    return "low"
+
+
 class PayloadType(IntEnum):
     """Types of DotBot payload types."""
 

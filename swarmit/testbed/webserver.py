@@ -42,7 +42,13 @@ from swarmit.testbed.model import (
     create_prevent_overlap_trigger,
     create_session_factory,
 )
-from swarmit.testbed.protocol import ImageResult, ImageState, StatusType
+from swarmit.testbed.protocol import (
+    ImageResult,
+    ImageState,
+    StatusType,
+    battery_level,
+    battery_pct,
+)
 
 DATA_DIR = "./.data"
 API_DB_URL = f"sqlite:///{DATA_DIR}/database.db"
@@ -534,6 +540,8 @@ def _serialise_node(node, include_device_info_raw: bool = True) -> dict:
         "status": node.status.name,
         "reset_cause": format_reset_cause(node),
         "fault_name": fault_name(node),
+        "battery_pct": battery_pct(node.device, node.battery),
+        "battery_level": battery_level(node.device, node.battery),
     }
     if isinstance(data.get("info"), dict) and node.info is not None:
         data["info"] = {
