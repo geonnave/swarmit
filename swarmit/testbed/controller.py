@@ -326,6 +326,30 @@ def fault_name(device_data) -> str:
         return f"fault{device_data.fault}"
 
 
+def reset_severity(device_data) -> str:
+    """How much attention the last reset deserves: crashed, hung or normal.
+
+    `format_reset_cause` already draws this line in words; this is the same
+    branch as a value, so a UI can style by it without parsing the sentence or
+    re-deriving the bit tests.
+
+    "hung" is deliberately its own tier rather than part of "crashed". A
+    sandbox app has no clean way to exit - stopping the keep-alive and letting
+    WDT0 fire is the only mechanism it has - so a normal completion latches
+    WatchdogTimeout and would otherwise mark every bot that finished its run.
+
+    A lockup is reported as normal here: a cabled flash sets that bit on the
+    first boot afterwards, so treating it as a crash flags every freshly
+    programmed device. The word still shows in `reset_cause`.
+    """
+    rr = device_data.reset_reason
+    if device_data.fault or (rr & _RR_WDT0):
+        if device_data.fault == FaultType.WatchdogTimeout.value:
+            return "hung"
+        return "crashed"
+    return "normal"
+
+
 def format_reset_cause(device_data) -> str:
     """Friendly one-line label for a node's last reset cause.
 

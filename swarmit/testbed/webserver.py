@@ -34,6 +34,7 @@ from swarmit.testbed.controller import (
     ResetLocation,
     fault_name,
     format_reset_cause,
+    reset_severity,
 )
 from swarmit.testbed.model import (
     Base,
@@ -540,6 +541,7 @@ def _serialise_node(node, include_device_info_raw: bool = True) -> dict:
         "status": node.status.name,
         "reset_cause": format_reset_cause(node),
         "fault_name": fault_name(node),
+        "reset_severity": reset_severity(node),
         "battery_pct": battery_pct(node.device, node.battery),
         "battery_level": battery_level(node.device, node.battery),
     }
