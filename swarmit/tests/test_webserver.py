@@ -391,3 +391,48 @@ def test_serialise_node_tolerates_a_device_that_never_answered():
 
     out = _serialise_node(NodeStatus(), include_device_info_raw=False)
     assert out["info"] is None
+
+
+def test_serialise_node_carries_the_display_strings_the_cli_renders():
+    """An HTTP client should not have to reimplement swarmit's vocabulary.
+
+    `lh2_summary` is the one that forces this: it is a property, so `asdict`
+    drops it and a client can only rebuild it by copying the flag bits and the
+    wording, which then drifts the next time either changes.
+    """
+    from swarmit.testbed.controller import (
+        DeviceInfo,
+        NodeStatus,
+        format_reset_cause,
+    )
+    from swarmit.testbed.webserver import _serialise_node
+
+    node = NodeStatus(
+        reset_reason=1 << 25,  # watchdog1 = a commanded stop
+        info=DeviceInfo(
+            lh2_homography_count=2,
+            lh2_flags=0b11,  # valid + from flash
+            image_state=0,
+            image_result=1,
+        ),
+    )
+    out = _serialise_node(node)
+
+    assert out["reset_cause"] == "stopped" == format_reset_cause(node)
+    assert out["fault_name"] == "NoFault"
+    assert out["info"]["lh2_summary"] == "2 basestations (valid, from flash)"
+    assert out["info"]["image_state_name"] == "Idle"
+    assert out["info"]["image_result_name"] == "Success"
+    # The raw fields stay: the strings are additive, not a replacement.
+    assert out["reset_reason"] == 1 << 25
+    assert out["info"]["lh2_flags"] == 0b11
+
+
+def test_serialise_node_falls_back_to_the_raw_value_for_an_unknown_enum():
+    """A device running ahead of the host must not 500 the status route."""
+    from swarmit.testbed.controller import DeviceInfo, NodeStatus
+    from swarmit.testbed.webserver import _serialise_node
+
+    out = _serialise_node(NodeStatus(info=DeviceInfo(image_result=99)))
+
+    assert out["info"]["image_result_name"] == "99"
