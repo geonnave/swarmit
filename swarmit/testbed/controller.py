@@ -1371,8 +1371,14 @@ class Controller:
         payload = PayloadStart()
         self.send_payload(int(device_addr, 16), payload)
 
-    def start(self, devices=None, timeout=COMMAND_TIMEOUT):
-        """Start the application."""
+    def start(self, devices=None):
+        """Start the application.
+
+        Returns once every target reports Running, or after
+        COMMAND_MAX_ATTEMPTS tries. Rendering the result is the caller's job:
+        the CLI wraps this in its own Rich Live via `_live_run`, and the HTTP
+        route has no terminal to draw on.
+        """
         if devices is None:
             devices = self.settings.devices or []
         ready_devices = self.ready_devices
@@ -1394,12 +1400,17 @@ class Controller:
                     self._send_start(device_addr)
             attempts += 1
             time.sleep(COMMAND_ATTEMPT_DELAY)
-        self._live_status(
-            timeout, devices=devices_to_start, message="to start"
-        )
 
-    def stop(self, devices=None, timeout=COMMAND_TIMEOUT):
-        """Stop the application."""
+
+    def stop(self, devices=None):
+        """Stop the application.
+
+        The device side takes about a second longer than `start`: a stop
+        request starts WDT1 (`CRV = 32768 - 1`, one second) through a DPPI
+        channel rather than resetting the core, so the application keeps
+        running until that expires. See the bootloader's IPC_RECEIVE ->
+        WDT_START wiring.
+        """
         if devices is None:
             devices = self.settings.devices or []
         stoppable_devices = self.running_devices + self.resetting_devices
@@ -1422,7 +1433,6 @@ class Controller:
                     self.send_payload(int(device_addr, 16), PayloadStop())
             attempts += 1
             time.sleep(COMMAND_ATTEMPT_DELAY)
-        self._live_status(timeout, devices=devices_to_stop, message="to stop")
 
     def _send_reset(self, device_addr: int, location: ResetLocation):
         payload = PayloadReset(
