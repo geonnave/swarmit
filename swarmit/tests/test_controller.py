@@ -1491,3 +1491,42 @@ def test_calibration_and_position_reach_the_panel_from_the_wire():
 
     node.stop()
     controller.terminate()
+
+
+@pytest.mark.parametrize(
+    "reset_reason,fault,expected",
+    [
+        (0, 0, "normal"),  # power-on
+        (1 << 25, 0, "normal"),  # commanded stop
+        (1 << 3, 0, "normal"),  # soft-reset
+        (
+            1 << 4,
+            0,
+            "normal",
+        ),  # lockup: a cabled flash sets this on first boot
+        (0, 3, "hung"),  # WatchdogTimeout: an app that finished, deliberately
+        (1 << 1, 3, "hung"),  # the deadman fired, still no fault raised
+        (1 << 1, 0, "crashed"),  # crash deadman with no fault latched
+        (0, 1, "crashed"),  # HardFault
+        (0, 2, "crashed"),  # SecureFault
+    ],
+)
+def test_reset_severity_matches_the_wording_of_format_reset_cause(
+    reset_reason, fault, expected
+):
+    """The tier and the sentence must not disagree.
+
+    A UI styles by the tier and shows the sentence, so a bot reading "hung"
+    beside a crash badge would be its own bug.
+    """
+    from swarmit.testbed.controller import (
+        NodeStatus,
+        format_reset_cause,
+        reset_severity,
+    )
+
+    node = NodeStatus(reset_reason=reset_reason, fault=fault)
+
+    assert reset_severity(node) == expected
+    if expected != "normal":
+        assert format_reset_cause(node).startswith(expected)
