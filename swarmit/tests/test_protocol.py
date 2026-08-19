@@ -280,3 +280,37 @@ def test_watchdog_timeout_rides_the_existing_crash_report():
 )
 def test_decode_ipsr(psr, expected):
     assert decode_ipsr(psr) == expected
+
+
+def test_battery_pct_reads_the_v3_supercap_as_stored_energy():
+    """A straight voltage ratio reads 20% on a v3 that can no longer move.
+
+    The pack is a 3.0 V supercapacitor that browns out at 0.6 V, and a
+    capacitor holds energy as 1/2 C V^2, so the usable fraction is the span
+    between the squares.
+    """
+    from swarmit.testbed.protocol import DeviceType, battery_pct
+
+    v3 = DeviceType.DotBotV3
+    assert battery_pct(v3, 3000) == 100
+    assert battery_pct(v3, 600) == 0  # brownout is empty, not 20%
+    assert battery_pct(v3, 400) == 0  # never negative
+    assert battery_pct(v3, 2300) == 57
+    assert battery_pct(v3, 1500) == 21  # the warning line is a fifth left
+
+
+def test_battery_pct_leaves_unprofiled_devices_on_the_historical_reading():
+    """DotBotV2 is battery-backed and needs measured voltages of its own."""
+    from swarmit.testbed.protocol import DeviceType, battery_pct
+
+    assert battery_pct(DeviceType.DotBotV2, 2300) == 76
+    assert battery_pct(DeviceType.Unknown, 3000) == 100
+
+
+def test_battery_level_bands_follow_the_profile():
+    from swarmit.testbed.protocol import DeviceType, battery_level
+
+    v3 = DeviceType.DotBotV3
+    assert battery_level(v3, 2950) == "full"
+    assert battery_level(v3, 2300) == "ok"
+    assert battery_level(v3, 1400) == "low"
