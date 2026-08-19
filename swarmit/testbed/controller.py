@@ -317,7 +317,8 @@ def battery_level_color(level: int):
     return "red"
 
 
-def _fault_name(device_data) -> str:
+def fault_name(device_data) -> str:
+    """Name of the latched fault, or a placeholder for an unknown code."""
     try:
         return FaultType(device_data.fault).name
     except ValueError:
@@ -344,7 +345,7 @@ def format_reset_cause(device_data) -> str:
             return f"hung ({reset_name} pc=0x{device_data.pc:08x})"
         if device_data.fault:
             return (
-                f"crashed ({reset_name} {_fault_name(device_data)} "
+                f"crashed ({reset_name} {fault_name(device_data)} "
                 f"pc=0x{device_data.pc:08x})"
             )
         return f"crashed ({reset_name})"
@@ -779,7 +780,7 @@ def generate_info(status_data, devices=[], show_raw=False):
         )
         table.add_row(
             "  fault",
-            f"{_fault_name(d)}"
+            f"{fault_name(d)}"
             + (" (non-secure)" if d.fault and d.from_ns else "")
             + (" (secure)" if d.fault and not d.from_ns else ""),
         )
