@@ -1384,6 +1384,47 @@ def test_position_says_no_fix_instead_of_the_origin():
     assert "1200, 1300" in _render(generate_status(located))
 
 
+def test_position_tells_uncalibrated_apart_from_a_missing_fix():
+    """Two ways to be nowhere, two different things to go and do.
+
+    Both printed `no fix`, which sent the operator to inspect the lighthouses
+    for a bot that had never been calibrated - where no amount of coverage
+    would have changed the cell. Device info already says which it is, so the
+    cell says it too, in the same word as the `LH2 calibration` row.
+    """
+    uncalibrated = {"AA": NodeStatus(info=DeviceInfo(info_version=1))}
+    out = _render(generate_info(uncalibrated, []))
+    assert "uncalibrated" in out
+    assert "no fix" not in out
+
+    # A fleet that disagrees keeps the LH2 column, so calibration is not also
+    # named in the header line and the Position cell is the only place the
+    # word can come from.
+    fleet = {
+        "AA": NodeStatus(info=DeviceInfo(info_version=1)),
+        "BB": NodeStatus(
+            info=DeviceInfo(
+                info_version=1, lh2_homography_count=2, lh2_flags=0b11
+            )
+        ),
+    }
+    out = _render(generate_status(fleet))
+    assert "uncalibrated" in out  # AA was never calibrated
+    assert "no fix" in out  # BB is calibrated and out of coverage
+
+
+def test_position_stays_no_fix_when_device_info_has_not_landed():
+    """An unknown reason gets the honest label, not a guessed one.
+
+    Until device info arrives the controller cannot tell an uncalibrated bot
+    from one out of coverage, and `no fix` is still literally true - so it
+    stays, on both surfaces, rather than growing a fourth string.
+    """
+    unknown = {"AA": NodeStatus(info=None, last_updated_at=time.time())}
+    assert "no fix" in _render(generate_info(unknown, []))
+    assert "no fix" in _render(generate_status(unknown))
+
+
 def test_status_collapses_calibration_when_the_fleet_agrees():
     """One arena, one calibration run - so normally one value, stated once.
 
