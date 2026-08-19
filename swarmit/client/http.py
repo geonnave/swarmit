@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 from typing import Iterator
 from urllib.error import HTTPError, URLError
@@ -268,6 +269,22 @@ class HTTPSwarmitClient:
             ) from e
 
 
+_DEVICE_INFO_FIELDS = {f.name for f in dataclasses.fields(DeviceInfo)}
+
+
+def _parse_device_info(info: dict) -> DeviceInfo:
+    """JSON dict → DeviceInfo, ignoring keys this client does not know.
+
+    `/status` carries display strings computed server-side (`lh2_summary`,
+    `image_state_name`, ...) beside the raw fields, so splatting the whole
+    dict raises on its own daemon's payload, not merely on a newer one. The
+    payload is meant to grow; the client reads the fields it knows.
+    """
+    return DeviceInfo(
+        **{k: v for k, v in info.items() if k in _DEVICE_INFO_FIELDS}
+    )
+
+
 def _parse_node_status(d: dict) -> NodeStatus:
     """JSON dict from /status → NodeStatus dataclass."""
     info = d.get("info")
@@ -289,5 +306,5 @@ def _parse_node_status(d: dict) -> NodeStatus:
         info_gen=d.get("info_gen", 0),
         # A daemon predating device info sends no "info" key at all, and a
         # bot that has not answered yet leaves it null.
-        info=DeviceInfo(**info) if isinstance(info, dict) else None,
+        info=_parse_device_info(info) if isinstance(info, dict) else None,
     )
