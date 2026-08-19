@@ -307,10 +307,18 @@ def test_battery_pct_leaves_unprofiled_devices_on_the_historical_reading():
     assert battery_pct(DeviceType.Unknown, 3000) == 100
 
 
-def test_battery_level_bands_follow_the_profile():
+def test_battery_level_bands_match_the_bootloader_led():
+    """The bootloader drives its status LED off the same two thresholds.
+
+    device/bootloader/Source/main.c uses `> BATTERY_VOLTAGE_FULL` (2900) for
+    blue and `> BATTERY_VOLTAGE_WARNING` (1500) for green. A bot showing a
+    blue LED beside an "ok" host reading is a confusing pair, so the
+    boundaries are asserted exactly, not approximately.
+    """
     from swarmit.testbed.protocol import DeviceType, battery_level
 
     v3 = DeviceType.DotBotV3
-    assert battery_level(v3, 2950) == "full"
-    assert battery_level(v3, 2300) == "ok"
-    assert battery_level(v3, 1400) == "low"
+    assert battery_level(v3, 2901) == "full"
+    assert battery_level(v3, 2900) == "ok"  # not > 2900: the LED is green here
+    assert battery_level(v3, 1501) == "ok"
+    assert battery_level(v3, 1500) == "low"  # not > 1500: the LED is red here

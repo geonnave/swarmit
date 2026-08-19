@@ -42,24 +42,33 @@ class BatteryProfile:
     than at zero, so a straight voltage ratio badly overstates what is left -
     it reads 20% on a v3 that can no longer move. A battery-backed robot holds
     its voltage far better across a discharge and is closer to linear.
+
+    The band thresholds mirror the bootloader, which drives the status LED off
+    the same two numbers (`BATTERY_VOLTAGE_FULL` / `BATTERY_VOLTAGE_WARNING` in
+    device/bootloader/Source/main.c). Keep them in step: a bot showing a blue
+    LED and an "ok" host reading is a confusing pair. Only the percentage is
+    computed here; the firmware has no notion of one.
     """
 
-    full_mv: int  # 100%
+    max_mv: int  # the 100% reference
     empty_mv: int  # 0%: below this the robot does not run
-    warning_mv: int  # below this the reading is shown as critical
+    full_mv: int  # at or above this the reading shows as full
+    warning_mv: int  # below this the reading shows as critical
     supercap: bool = False  # energy goes as V^2 rather than as V
 
 
 # v3: 3.0 V supercapacitor, brownout at 0.6 V.
 _DOTBOT_V3_BATTERY = BatteryProfile(
-    full_mv=3000, empty_mv=600, warning_mv=1500, supercap=True
+    max_mv=3000, empty_mv=600, full_mv=2900, warning_mv=1500, supercap=True
 )
 
 # Everything else keeps the historical straight-voltage reading. DotBotV2 is
 # battery-backed and wants its own profile; its real full/empty voltages have
 # not been measured, and guessing them would put a confident wrong number in
 # front of an operator.
-_DEFAULT_BATTERY = BatteryProfile(full_mv=3000, empty_mv=0, warning_mv=1500)
+_DEFAULT_BATTERY = BatteryProfile(
+    max_mv=3000, empty_mv=0, full_mv=2900, warning_mv=1500
+)
 
 BATTERY_PROFILES = {
     DeviceType.DotBotV3: _DOTBOT_V3_BATTERY,
@@ -77,10 +86,10 @@ def battery_pct(device: DeviceType, battery_mv: int) -> int:
         # A capacitor stores energy as 1/2 C V^2, so the usable fraction is the
         # span between the squares, not between the voltages.
         num = battery_mv**2 - p.empty_mv**2
-        den = p.full_mv**2 - p.empty_mv**2
+        den = p.max_mv**2 - p.empty_mv**2
     else:
         num = battery_mv - p.empty_mv
-        den = p.full_mv - p.empty_mv
+        den = p.max_mv - p.empty_mv
     if den <= 0:
         return 0
     return max(0, min(100, int(num / den * 100)))
@@ -89,7 +98,7 @@ def battery_pct(device: DeviceType, battery_mv: int) -> int:
 def battery_level(device: DeviceType, battery_mv: int) -> str:
     """Band the reading falls in: full, ok or low."""
     p = battery_profile(device)
-    if battery_mv > p.full_mv - 100:
+    if battery_mv > p.full_mv:
         return "full"
     if battery_mv > p.warning_mv:
         return "ok"
