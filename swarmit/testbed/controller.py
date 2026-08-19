@@ -1401,7 +1401,6 @@ class Controller:
             attempts += 1
             time.sleep(COMMAND_ATTEMPT_DELAY)
 
-
     def stop(self, devices=None):
         """Stop the application.
 
