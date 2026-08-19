@@ -105,7 +105,7 @@ def test_controller_start_broadcast():
     for node in nodes:
         test_adapter.add_node(node)
 
-    controller.start(timeout=0.1)
+    controller.start()
     time.sleep(0.3)
     assert all([node.status == StatusType.Running for node in nodes]) is True
 
@@ -135,7 +135,7 @@ def test_controller_start_unicast():
     ]
 
     controller.status_data = {}
-    controller.start(devices=["00000001", "00000003"], timeout=0.1)
+    controller.start(devices=["00000001", "00000003"])
     time.sleep(0.3)
     assert nodes[0].status == StatusType.Running
     assert nodes[1].status == StatusType.Bootloader
@@ -165,7 +165,7 @@ def test_controller_start_broadcast_cloud_adapter():
     for node in nodes:
         test_adapter.add_node(node)
 
-    controller.start(timeout=0.1)
+    controller.start()
     time.sleep(0.3)
     assert all([node.status == StatusType.Running for node in nodes]) is True
 
@@ -187,7 +187,7 @@ def test_controller_stop_broadcast():
     for node in nodes:
         test_adapter.add_node(node)
 
-    controller.stop(timeout=0.1)
+    controller.stop()
     time.sleep(0.3)
     assert (
         all([node.status == StatusType.Bootloader for node in nodes]) is True
@@ -218,7 +218,7 @@ def test_controller_stop_unicast():
         f"{node.address:08X}" for node in nodes
     ]
 
-    controller.stop(devices=["00000001", "00000003"], timeout=0.1)
+    controller.stop(devices=["00000001", "00000003"])
     time.sleep(0.3)
     assert nodes[0].status == StatusType.Bootloader
     assert nodes[1].status == StatusType.Running
@@ -317,7 +317,7 @@ def test_controller_reset():
     time.sleep(0.3)
     for node in nodes:
         assert node.status == StatusType.Resetting
-    controller.stop(timeout=0.1)
+    controller.stop()
     time.sleep(0.3)
     assert (
         all([node.status == StatusType.Bootloader for node in nodes]) is True
@@ -352,7 +352,7 @@ def test_controller_reset_not_ready():
     assert node1.status == StatusType.Resetting
     assert node2.status == StatusType.Running
 
-    controller.stop(timeout=0.1)
+    controller.stop()
     time.sleep(0.3)
     assert node1.status == StatusType.Bootloader
     assert node2.status == StatusType.Bootloader

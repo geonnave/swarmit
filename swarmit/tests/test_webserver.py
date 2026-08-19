@@ -148,14 +148,25 @@ def test_start_token_invalid(client, monkeypatch):
     assert res.json()["detail"] == "Invalid token"
 
 
-def test_start_devices_none(client, capsys):
+def test_start_devices_none(client):
+    """A null device list starts the whole fleet.
+
+    Asserted on the payloads that went out rather than on captured stdout:
+    the HTTP route has no terminal, and the command no longer renders one.
+    """
+    controller = client.app.state.controller
+
     res = client.post(
         "/start",
         json={"devices": None},
         headers={"Authorization": "Bearer FAKE_TOKEN"},
     )
+
     assert res.status_code == 200
-    assert "2 devices to start" in capsys.readouterr().out
+    assert res.json() == {"response": "done"}
+    assert [n.status for n in controller.status_data.values()] == [
+        StatusType.Running
+    ] * 3
 
 
 def test_start_devices_not_string(client):
