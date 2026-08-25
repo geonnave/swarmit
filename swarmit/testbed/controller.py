@@ -329,18 +329,8 @@ def fault_name(device_data) -> str:
 def reset_severity(device_data) -> str:
     """How much attention the last reset deserves: crashed, hung or normal.
 
-    `format_reset_cause` already draws this line in words; this is the same
-    branch as a value, so a UI can style by it without parsing the sentence or
-    re-deriving the bit tests.
-
-    "hung" is deliberately its own tier rather than part of "crashed". A
-    sandbox app has no clean way to exit - stopping the keep-alive and letting
-    WDT0 fire is the only mechanism it has - so a normal completion latches
-    WatchdogTimeout and would otherwise mark every bot that finished its run.
-
-    A lockup is reported as normal here: a cabled flash sets that bit on the
-    first boot afterwards, so treating it as a crash flags every freshly
-    programmed device. The word still shows in `reset_cause`.
+    "hung" is a separate tier from "crashed" because a watchdog timeout
+    raises no fault.
     """
     rr = device_data.reset_reason
     if device_data.fault or (rr & _RR_WDT0):
@@ -1399,9 +1389,7 @@ class Controller:
         """Start the application.
 
         Returns once every target reports Running, or after
-        COMMAND_MAX_ATTEMPTS tries. Rendering the result is the caller's job:
-        the CLI wraps this in its own Rich Live via `_live_run`, and the HTTP
-        route has no terminal to draw on.
+        COMMAND_MAX_ATTEMPTS tries. Rendering the result is the caller's job.
         """
         if devices is None:
             devices = self.settings.devices or []
@@ -1428,11 +1416,8 @@ class Controller:
     def stop(self, devices=None):
         """Stop the application.
 
-        The device side takes about a second longer than `start`: a stop
-        request starts WDT1 (`CRV = 32768 - 1`, one second) through a DPPI
-        channel rather than resetting the core, so the application keeps
-        running until that expires. See the bootloader's IPC_RECEIVE ->
-        WDT_START wiring.
+        The application keeps running for about a second after the request:
+        the device stops by arming WDT1, not by resetting the core.
         """
         if devices is None:
             devices = self.settings.devices or []

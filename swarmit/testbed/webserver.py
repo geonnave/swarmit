@@ -529,11 +529,8 @@ def _serialise_node(node, include_device_info_raw: bool = True) -> dict:
     stream that emits twice a second is most of the stream, so `/events` drops
     it and `/status`, which is fetched once per command, keeps it.
 
-    The raw fields are joined by the display strings the CLI renders, so an
-    HTTP client shows what `swarmit info` shows without reimplementing the
-    vocabulary. `lh2_summary` is the case that forces the issue: it is a
-    property, so `asdict` drops it silently and a client has no way to
-    reconstruct it except by copying the flag bits and the wording.
+    The raw fields are joined by the display strings the CLI renders.
+    `lh2_summary` is a property, so `asdict` drops it silently.
     """
     data = {
         **asdict(node),

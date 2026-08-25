@@ -39,15 +39,11 @@ class BatteryProfile:
 
     Per device type because the pack differs. The v3 runs a supercapacitor:
     stored energy goes as V^2, and the robot browns out at `empty_mv` rather
-    than at zero, so a straight voltage ratio badly overstates what is left -
-    it reads 20% on a v3 that can no longer move. A battery-backed robot holds
-    its voltage far better across a discharge and is closer to linear.
+    than at zero.
 
-    The band thresholds mirror the bootloader, which drives the status LED off
-    the same two numbers (`BATTERY_VOLTAGE_FULL` / `BATTERY_VOLTAGE_WARNING` in
-    device/bootloader/Source/main.c). Keep them in step: a bot showing a blue
-    LED and an "ok" host reading is a confusing pair. Only the percentage is
-    computed here; the firmware has no notion of one.
+    `full_mv` and `warning_mv` mirror `BATTERY_VOLTAGE_FULL` /
+    `BATTERY_VOLTAGE_WARNING` in device/bootloader/Source/main.c, which drives
+    the status LED off the same two numbers. They must stay in step.
     """
 
     max_mv: int  # the 100% reference
@@ -63,9 +59,8 @@ _DOTBOT_V3_BATTERY = BatteryProfile(
 )
 
 # Everything else keeps the historical straight-voltage reading. DotBotV2 is
-# battery-backed and wants its own profile; its real full/empty voltages have
-# not been measured, and guessing them would put a confident wrong number in
-# front of an operator.
+# battery-backed and wants its own profile, but its real full/empty voltages
+# have not been measured.
 _DEFAULT_BATTERY = BatteryProfile(
     max_mv=3000, empty_mv=0, full_mv=2900, warning_mv=1500
 )

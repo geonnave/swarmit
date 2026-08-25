@@ -275,10 +275,8 @@ _DEVICE_INFO_FIELDS = {f.name for f in dataclasses.fields(DeviceInfo)}
 def _parse_device_info(info: dict) -> DeviceInfo:
     """JSON dict → DeviceInfo, ignoring keys this client does not know.
 
-    `/status` carries display strings computed server-side (`lh2_summary`,
-    `image_state_name`, ...) beside the raw fields, so splatting the whole
-    dict raises on its own daemon's payload, not merely on a newer one. The
-    payload is meant to grow; the client reads the fields it knows.
+    `/status` carries server-computed display strings beside the raw fields
+    and is meant to grow, so the client reads only the fields it knows.
     """
     return DeviceInfo(
         **{k: v for k, v in info.items() if k in _DEVICE_INFO_FIELDS}
