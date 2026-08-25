@@ -32,6 +32,9 @@ from swarmit.testbed.controller import (
     Controller,
     ControllerSettings,
     ResetLocation,
+    fault_name,
+    format_reset_cause,
+    reset_severity,
 )
 from swarmit.testbed.model import (
     Base,
@@ -40,7 +43,13 @@ from swarmit.testbed.model import (
     create_prevent_overlap_trigger,
     create_session_factory,
 )
-from swarmit.testbed.protocol import StatusType
+from swarmit.testbed.protocol import (
+    ImageResult,
+    ImageState,
+    StatusType,
+    battery_level,
+    battery_pct,
+)
 
 DATA_DIR = "./.data"
 API_DB_URL = f"sqlite:///{DATA_DIR}/database.db"
@@ -504,6 +513,14 @@ async def flash_stream(payload: FlashRequest, request: Request):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+def _enum_name(enum_cls, value: int) -> str:
+    """The enum's name, or the raw value when the device reports one we lack."""
+    try:
+        return enum_cls(value).name
+    except ValueError:
+        return str(value)
+
+
 def _serialise_node(node, include_device_info_raw: bool = True) -> dict:
     """One NodeStatus as JSON, optionally without the device-info wire bytes.
 
@@ -511,12 +528,29 @@ def _serialise_node(node, include_device_info_raw: bool = True) -> dict:
     across 100 devices - and only `info --raw` ever reads it. Carrying it on a
     stream that emits twice a second is most of the stream, so `/events` drops
     it and `/status`, which is fetched once per command, keeps it.
+
+    The raw fields are joined by the display strings the CLI renders.
+    `lh2_summary` is a property, so `asdict` drops it silently.
     """
     data = {
         **asdict(node),
         "device": node.device.name,
         "status": node.status.name,
+        "reset_cause": format_reset_cause(node),
+        "fault_name": fault_name(node),
+        "reset_severity": reset_severity(node),
+        "battery_pct": battery_pct(node.device, node.battery),
+        "battery_level": battery_level(node.device, node.battery),
     }
+    if isinstance(data.get("info"), dict) and node.info is not None:
+        data["info"] = {
+            **data["info"],
+            "lh2_summary": node.info.lh2_summary,
+            "image_state_name": _enum_name(ImageState, node.info.image_state),
+            "image_result_name": _enum_name(
+                ImageResult, node.info.image_result
+            ),
+        }
     if not include_device_info_raw and isinstance(data.get("info"), dict):
         data["info"] = {**data["info"], "raw": ""}
     return data

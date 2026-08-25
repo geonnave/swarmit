@@ -299,3 +299,64 @@ def test_local_flash_skips_stale_bootloaders_and_flashes_the_rest(
     started = [e for e in events if e["type"] == "flash_started"]
     assert len(started) == 1
     assert started[0]["devices"] == ["A"]
+
+
+def test_parse_node_status_ignores_server_fields_the_client_does_not_know():
+    """The client must ignore payload keys that are not dataclass fields.
+
+    `/status` carries display strings computed server-side beside the raw
+    fields. Splatting the whole `info` dict into DeviceInfo made every one of
+    them a TypeError - not only across versions but within a single one, since
+    the server and the client here are the same build: `swarmit status` died
+    on `lh2_summary` against its own daemon.
+    """
+    from swarmit.client.http import _parse_node_status
+
+    node = _parse_node_status(
+        {
+            "device": "DotBotV3",
+            "status": "Running",
+            "battery": 2300,
+            "pos_x": 0,
+            "pos_y": 0,
+            "last_updated_at": 0.0,
+            # Computed server-side, not fields of NodeStatus / DeviceInfo.
+            "reset_cause": "stopped",
+            "fault_name": "NoFault",
+            "battery_pct": 57,
+            "battery_level": "ok",
+            "a_field_from_a_future_daemon": 1,
+            "info": {
+                "image_name": "dotbot-sandbox-dotbot-v3.bin",
+                "lh2_homography_count": 1,
+                "lh2_flags": 3,
+                "lh2_summary": "1 basestation (valid, from flash)",
+                "image_state_name": "Idle",
+                "image_result_name": "Success",
+                "another_future_field": "x",
+            },
+        }
+    )
+
+    assert node.battery == 2300
+    assert node.info is not None
+    assert node.info.image_name == "dotbot-sandbox-dotbot-v3.bin"
+    # The property still derives it locally from the raw fields.
+    assert node.info.lh2_summary == "1 basestation (valid, from flash)"
+
+
+def test_parse_node_status_still_reads_a_daemon_without_device_info():
+    from swarmit.client.http import _parse_node_status
+
+    node = _parse_node_status(
+        {
+            "device": "DotBotV3",
+            "status": "Bootloader",
+            "battery": 0,
+            "pos_x": 0,
+            "pos_y": 0,
+            "last_updated_at": 0.0,
+        }
+    )
+
+    assert node.info is None

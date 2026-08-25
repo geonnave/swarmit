@@ -56,6 +56,8 @@ from swarmit.testbed.protocol import (
     PayloadStop,
     PayloadType,
     StatusType,
+    battery_level,
+    battery_pct,
     decode_cfsr,
     decode_ipsr,
     decode_reset_reason,
@@ -309,19 +311,33 @@ def addr_to_hex(addr: int) -> str:
     return hexlify(addr.to_bytes(8, "big")).decode().upper()
 
 
-def battery_level_color(level: int):
-    if level > VOLTAGE_FULL:
-        return "cyan"
-    if level > VOLTAGE_WARNING:
-        return "green"
-    return "red"
+def battery_level_color(device_data):
+    """Rich colour for the reading, on this robot's own battery profile."""
+    return {"full": "cyan", "ok": "green", "low": "red"}[
+        battery_level(device_data.device, device_data.battery)
+    ]
 
 
-def _fault_name(device_data) -> str:
+def fault_name(device_data) -> str:
+    """Name of the latched fault, or a placeholder for an unknown code."""
     try:
         return FaultType(device_data.fault).name
     except ValueError:
         return f"fault{device_data.fault}"
+
+
+def reset_severity(device_data) -> str:
+    """How much attention the last reset deserves: crashed, hung or normal.
+
+    "hung" is a separate tier from "crashed" because a watchdog timeout
+    raises no fault.
+    """
+    rr = device_data.reset_reason
+    if device_data.fault or (rr & _RR_WDT0):
+        if device_data.fault == FaultType.WatchdogTimeout.value:
+            return "hung"
+        return "crashed"
+    return "normal"
 
 
 def format_reset_cause(device_data) -> str:
@@ -344,7 +360,7 @@ def format_reset_cause(device_data) -> str:
             return f"hung ({reset_name} pc=0x{device_data.pc:08x})"
         if device_data.fault:
             return (
-                f"crashed ({reset_name} {_fault_name(device_data)} "
+                f"crashed ({reset_name} {fault_name(device_data)} "
                 f"pc=0x{device_data.pc:08x})"
             )
         return f"crashed ({reset_name})"
@@ -624,7 +640,8 @@ def generate_status(status_data, devices=[], status_message="found"):
             (
                 f"{device_addr}",
                 f"{device_data.device.name}",
-                f"[{battery_level_color(device_data.battery)}]{device_data.battery / 1000:.2f}V ({int(device_data.battery / 3000 * 100)}%)",
+                f"[{battery_level_color(device_data)}]{device_data.battery / 1000:.2f}V "
+                f"({battery_pct(device_data.device, device_data.battery)}%)",
                 format_position(device_data),
                 f"{'[bold cyan]' if device_data.status == StatusType.Running else '[bold green]'}{device_data.status.name}",
                 image,
@@ -718,8 +735,8 @@ def generate_info(status_data, devices=[], show_raw=False):
         table.add_row("Status", d.status.name)
         table.add_row(
             "Battery",
-            f"[{battery_level_color(d.battery)}]{d.battery / 1000:.2f}V "
-            f"({int(d.battery / 3000 * 100)}%)",
+            f"[{battery_level_color(d)}]{d.battery / 1000:.2f}V "
+            f"({battery_pct(d.device, d.battery)}%)",
         )
         table.add_row("Position", format_position(d))
         if d.last_updated_at:
@@ -779,7 +796,7 @@ def generate_info(status_data, devices=[], show_raw=False):
         )
         table.add_row(
             "  fault",
-            f"{_fault_name(d)}"
+            f"{fault_name(d)}"
             + (" (non-secure)" if d.fault and d.from_ns else "")
             + (" (secure)" if d.fault and not d.from_ns else ""),
         )
@@ -1368,8 +1385,12 @@ class Controller:
         payload = PayloadStart()
         self.send_payload(int(device_addr, 16), payload)
 
-    def start(self, devices=None, timeout=COMMAND_TIMEOUT):
-        """Start the application."""
+    def start(self, devices=None):
+        """Start the application.
+
+        Returns once every target reports Running, or after
+        COMMAND_MAX_ATTEMPTS tries. Rendering the result is the caller's job.
+        """
         if devices is None:
             devices = self.settings.devices or []
         ready_devices = self.ready_devices
@@ -1391,12 +1412,13 @@ class Controller:
                     self._send_start(device_addr)
             attempts += 1
             time.sleep(COMMAND_ATTEMPT_DELAY)
-        self._live_status(
-            timeout, devices=devices_to_start, message="to start"
-        )
 
-    def stop(self, devices=None, timeout=COMMAND_TIMEOUT):
-        """Stop the application."""
+    def stop(self, devices=None):
+        """Stop the application.
+
+        The application keeps running for about a second after the request:
+        the device stops by arming WDT1, not by resetting the core.
+        """
         if devices is None:
             devices = self.settings.devices or []
         stoppable_devices = self.running_devices + self.resetting_devices
@@ -1419,7 +1441,6 @@ class Controller:
                     self.send_payload(int(device_addr, 16), PayloadStop())
             attempts += 1
             time.sleep(COMMAND_ATTEMPT_DELAY)
-        self._live_status(timeout, devices=devices_to_stop, message="to stop")
 
     def _send_reset(self, device_addr: int, location: ResetLocation):
         payload = PayloadReset(
