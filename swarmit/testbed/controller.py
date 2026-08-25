@@ -503,20 +503,11 @@ def format_position(status: NodeStatus) -> str:
     """Where the bot is, or which of the two reasons it is nowhere.
 
     `current_position` in shared memory is zero-initialised and only written
-    once a fix succeeds, and the fix cannot succeed at all without a loaded
-    calibration - so (0, 0) is what an unlocated bot reports, permanently for
-    an uncalibrated one. The calibrated arena sits two of its own widths away
-    from the origin, so a real fix cannot land there; printing it as a
-    coordinate only invites the reader to believe a fix exists.
-
-    The two ways to have no fix are opposite actions for the operator, so they
-    get different words. `uncalibrated` - device info says the bot carries no
-    homographies - means go and re-provision it, and no amount of staring at
-    the lighthouses will change the cell. `no fix` means the calibration is
-    there and the fix is not, so coverage or placement is what to check.
-    Device info that has not landed keeps `no fix`: the reason is genuinely
-    unknown then, and `no fix` is still literally true. Same vocabulary as the
-    `LH2 calibration` row, so the two read as one answer rather than two.
+    once a fix succeeds, and the calibrated arena never contains the origin,
+    so (0, 0) means no fix rather than a coordinate. The two reasons call for
+    opposite actions: `uncalibrated` (device info reports no homographies)
+    means re-provision the bot; `no fix` means check lighthouse coverage or
+    placement.
     """
     if status.pos_x == 0 and status.pos_y == 0:
         if status.info is not None and not status.info.lh2_homography_count:
